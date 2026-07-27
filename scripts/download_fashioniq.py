@@ -2,7 +2,6 @@
 
 import argparse
 import hashlib
-import logging
 import os
 import signal
 import time
@@ -12,7 +11,7 @@ import requests
 from PIL import Image
 from tqdm import tqdm
 
-
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_TYPES = ["dress", "shirt", "toptee"]
 SPLITS = ["train", "val", "test"]
 
@@ -158,9 +157,11 @@ def download_one(
     outfile = os.path.join(out_dir, asin + ".jpg")
 
     if os.path.exists(outfile):
-        return "exists"
+        return "exists", None
 
     tmp = outfile + ".tmp"
+
+    last_error = None
 
     for _ in range(retries):
 
@@ -176,43 +177,28 @@ def download_one(
                 raise RuntimeError("status")
 
             with open(tmp, "wb") as f:
-
                 for chunk in r.iter_content(8192):
                     if chunk:
                         f.write(chunk)
 
             if not verify_image(tmp, placeholder_hashes):
-
-                logging.warning(
-                    "[%s] Placeholder image detected\nURL: %s\n",
-                    asin,
-                    url,
-                )
-
                 os.remove(tmp)
-
-                return "broken"
+                return "broken", "Placeholder image"
 
             os.rename(tmp, outfile)
-
-            return "downloaded"
+            
+            return "downloaded", None
 
         except Exception as e:
+
+            last_error = f"{type(e).__name__}: {e}"
 
             if os.path.exists(tmp):
                 os.remove(tmp)
 
-            logging.error(
-                "[%s] %s\nURL: %s\nReason: %s\n",
-                asin,
-                time.strftime("%Y-%m-%d %H:%M:%S"),
-                url,
-                repr(e),
-            )
-
             time.sleep(1)
 
-    return "failed"
+    return "failed", last_error
 
 
 def parse_selected(arg):
@@ -278,11 +264,6 @@ def main():
         exist_ok=True,
     )
 
-    logging.basicConfig(
-        filename="download.log",
-        level=logging.INFO,
-    )
-
     selected = parse_selected(args.splits)
 
     print("\nSelected:")
@@ -331,13 +312,8 @@ def main():
                 break
 
             if asin not in urls:
-                logging.error(
-                    "[%s] URL not found in metadata",
-                    asin,
-                )
-
                 stats["failed"] += 1
-                failed.append(asin)
+                failed.append((asin, "N/A", "URL not found in metadata"))
                 continue
 
             futures[
@@ -354,21 +330,37 @@ def main():
             as_completed(futures),
             total=len(futures),
         ):
+            status, reason = f.result()
 
-            r = f.result()
+            stats[status] += 1
 
-            stats[r] += 1
+            if status == "failed":
 
-            if r == "failed":
-                failed.append(futures[f])
+                failed.append(
+                    (
+                        futures[f],
+                        urls[futures[f]],
+                        reason,
+                    )
+                )
 
-    with open(
-        "failed_urls.txt",
-        "w",
-    ) as f:
+            elif status == "broken":
 
-        for x in failed:
-            f.write(x + "\n")
+                failed.append(
+                    (
+                        futures[f],
+                        urls[futures[f]],
+                        "Placeholder image",
+                    )
+                )
+
+    failed_file = os.path.join(SCRIPT_DIR, "failed_urls.txt")
+    with open(failed_file, "w") as f:
+        for asin, url, reason in failed:
+            f.write("=" * 60 + "\n")
+            f.write(f"ASIN   : {asin}\n")
+            f.write(f"URL    : {url}\n")
+            f.write(f"Reason : {reason}\n")
 
     print("\n========== SUMMARY ==========")
 
