@@ -39,31 +39,79 @@ class CIRRDataset(Dataset):
         }
 
 
+# class FashionIQDataset(Dataset):
+#     def __init__(self, dataset_path, split='test', dress_types=['dress', 'shirt', 'toptee'], preprocess=None):
+#         self.dataset_path = dataset_path
+#         self.split = split
+#         self.dress_types = dress_types
+#         self.preprocess = preprocess
+#         # Load dataset metadata
+#         self.metadata = []
+#         for dress_type in dress_types:
+#             with open(os.path.join(dataset_path, f'{dress_type}_{split}_metadata.json'), 'r') as f:
+#                 self.metadata.extend(json.load(f))
+
+#     def __len__(self):
+#         return len(self.metadata)
+
+#     def __getitem__(self, idx):
+#         item = self.metadata[idx]
+#         reference_image_path = os.path.join(self.dataset_path, 'images', item['reference_image'])
+#         reference_image = Image.open(reference_image_path).convert('RGB')
+#         if self.preprocess:
+#             reference_image = self.preprocess(reference_image)['pixel_values'][0]
+
+#         return {
+#             'reference_image': reference_image,
+#             'relative_caption': item['relative_caption']
+#         }
+
 class FashionIQDataset(Dataset):
-    def __init__(self, dataset_path, split='test', dress_types=['dress', 'shirt', 'toptee'], preprocess=None):
+    def __init__(self, dataset_path, split="val", dress_types=("dress", "shirt", "toptee"), preprocess=None):
         self.dataset_path = dataset_path
         self.split = split
-        self.dress_types = dress_types
         self.preprocess = preprocess
-        # Load dataset metadata
-        self.metadata = []
+
+        self.samples = []
         for dress_type in dress_types:
-            with open(os.path.join(dataset_path, f'{dress_type}_{split}_metadata.json'), 'r') as f:
-                self.metadata.extend(json.load(f))
+            cap_file = os.path.join(dataset_path, "captions", f"cap.{dress_type}.{split}.json")
+
+            if not os.path.exists(cap_file):
+                continue
+
+            with open(cap_file, "r") as f:
+                annotations = json.load(f)
+
+            for idx, ann in enumerate(annotations):
+                candidate = ann["candidate"]
+                image_path = os.path.join(dataset_path, "images", candidate + ".jpg")
+
+                # bỏ qua nếu thiếu ảnh
+                if not os.path.exists(image_path):
+                    continue
+
+                self.samples.append(
+                    {
+                        "pairid": f"{dress_type}_{candidate}_{split}_{idx}",
+                        "image_path": image_path,
+                        "relative_caption": "; ".join(ann["captions"])
+                    }
+                )
 
     def __len__(self):
-        return len(self.metadata)
+        return len(self.samples)
 
     def __getitem__(self, idx):
-        item = self.metadata[idx]
-        reference_image_path = os.path.join(self.dataset_path, 'images', item['reference_image'])
-        reference_image = Image.open(reference_image_path).convert('RGB')
-        if self.preprocess:
-            reference_image = self.preprocess(reference_image)['pixel_values'][0]
+        sample = self.samples[idx]
+        image = Image.open(sample["image_path"]).convert("RGB")
+
+        if self.preprocess is not None:
+            image = self.preprocess(image)["pixel_values"][0]
 
         return {
-            'reference_image': reference_image,
-            'relative_caption': item['relative_caption']
+            "reference_image": image,
+            "relative_caption": sample["relative_caption"],
+            "pairid": sample["pairid"],
         }
 
 
