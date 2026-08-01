@@ -20,6 +20,19 @@ parser.add_argument('--dataset', type=str, choices=['cirr', 'fashioniq'], defaul
 parser.add_argument('--text_embeddings_dir', type=str,
                     default="/path/to/embedded_text_lincir_cirr_test/",
                     help="Directory to save extracted embeddings (.pt files)")
+parser.add_argument("--dataset_path", type=str, 
+                    help="Path to the root directory of the dataset")
+parser.add_argument("--split", default="val",
+                    help='Dataset split to process')
+parser.add_argument("--dress_types", nargs="+",
+                    default=['dress'], choices=['dress', 'shirt', 'toptee'],
+                    help='ONLY for the FashionIQ dataset. Ignored for other datasets (e.g., CIRR, CIRCO)')
+parser.add_argument("--phi_path", type=str, default=None,
+                    help='Path to the checkpoint of the Phi model for OpenAI CLIP-ViT-L/14')
+parser.add_argument("--phi_path2", type=str, default=None,
+                    help='Path to the checkpoint of the Phi model for CLIP-Giga.')
+parser.add_argument("--batch_size", type=int, default=1)
+parser.add_argument("--num_workers", type=int, default=4)
 args = parser.parse_args()
 
 text_embeddings_dir = args.text_embeddings_dir
@@ -67,8 +80,8 @@ def encode_with_pseudo_tokens_HF(clip_model: CLIPTextModelWithProjection, text: 
         return x
 
 # Model and processor setup
-phi_path = '/path/to/phi_best.pt'
-phi_path_2 = '/path/to/phi_best_giga.pt'
+phi_path = args.phi_path if args.phi_path is not None else 'weights/phi_best.pt'
+phi_path_2 = args.phi_path2 if args.phi_path2 is not None else 'weights/phi_best_giga.pt'
 clip_model_name = 'openai/clip-vit-large-patch14'
 clip_model_name2 = 'Geonmo/CLIP-Giga-config-fixed'
 
@@ -86,10 +99,10 @@ clip_preprocess = CLIPImageProcessor(
 )
 
 # Load CLIP models
-clip_text_model1 = CLIPTextModelWithProjection.from_pretrained(clip_model_name, torch_dtype=torch.float32, cache_dir='./').float().to("cuda")
-clip_vision_model1 = CLIPVisionModelWithProjection.from_pretrained(clip_model_name, torch_dtype=torch.float32, cache_dir='./').float().to("cuda")
-clip_text_model2 = CLIPTextModelWithProjection.from_pretrained(clip_model_name2, torch_dtype=torch.float32, cache_dir='./').float().to("cuda")
-clip_vision_model2 = CLIPVisionModelWithProjection.from_pretrained(clip_model_name2, torch_dtype=torch.float32, cache_dir='./').float().to("cuda")
+clip_text_model1 = CLIPTextModelWithProjection.from_pretrained(clip_model_name, torch_dtype=torch.float32).float().to("cuda")
+clip_vision_model1 = CLIPVisionModelWithProjection.from_pretrained(clip_model_name, torch_dtype=torch.float32).float().to("cuda")
+clip_text_model2 = CLIPTextModelWithProjection.from_pretrained(clip_model_name2, torch_dtype=torch.float32).float().to("cuda")
+clip_vision_model2 = CLIPVisionModelWithProjection.from_pretrained(clip_model_name2, torch_dtype=torch.float32).float().to("cuda")
 
 # Load Phi models
 phi = Phi(input_dim=768, hidden_dim=768 * 4, output_dim=768, dropout=0)
@@ -101,51 +114,54 @@ phi_2 = phi_2.to(device="cuda").eval()
 
 # Dataset selection
 if args.dataset == 'cirr':
-    dataset_path = "/path/to/cirr/dataset"
-    dataset = CIRRDataset(dataset_path, split='test1', preprocess=clip_preprocess)
+    dataset_path = args.dataset_path if args.dataset_path is not None else "/path/to/cirr/dataset"
+    dataset = CIRRDataset(dataset_path, split=args.split, preprocess=clip_preprocess)
 elif args.dataset == 'fashioniq':
-    dataset_path = "/path/to/fashioniq/dataset"
-    dataset = FashionIQDataset(dataset_path, split='test', dress_types=['dress', 'shirt', 'toptee'], preprocess=clip_preprocess)
+    dataset_path = args.dataset_path if args.dataset_path is not None else "/path/to/fashioniq/dataset"
+    dataset = FashionIQDataset(dataset_path, split=args.split, dress_types=args.dress_types, preprocess=clip_preprocess)
 
 # DataLoader setup
 dataloader = torch.utils.data.DataLoader(
     dataset,
-    batch_size=4,
+    batch_size=args.batch_size,
     shuffle=False,
-    num_workers=4,
+    num_workers=args.num_workers,
+    pin_memory=True
 )
 
 # Main loop for extracting and saving features
-for batch in tqdm(dataloader, desc=f"Extracting features ({args.dataset})", unit="batch"):
-    pairid = batch.get('pairid', None)  # Use 'id' if available, else None
-    reference_image = batch['reference_image']
+with torch.inference_mode():
+    for batch in tqdm(dataloader, desc=f"Extracting features ({args.dataset})", unit="batch"):
+        pairid = batch.get('pairid', None)  # Use 'id' if available, else None
+        reference_image = batch['reference_image']
 
-    # Extract image features
-    image_features1 = clip_vision_model1(reference_image.to("cuda")).image_embeds
-    image_features2 = clip_vision_model2(reference_image.to("cuda")).image_embeds
+        # Extract image features
+        reference_image = reference_image.to("cuda", non_blocking=True)
+        image_features1 = clip_vision_model1(reference_image).image_embeds
+        image_features2 = clip_vision_model2(reference_image).image_embeds
 
-    # Predict pseudo tokens
-    predicted_tokens = phi(image_features1.to(torch.float32))
-    predicted_tokens2 = phi_2(image_features2.to(torch.float32))
+        # Predict pseudo tokens
+        predicted_tokens = phi(image_features1.to(torch.float32))
+        predicted_tokens2 = phi_2(image_features2.to(torch.float32))
 
-    # Prepare input captions
-    relative_captions = batch.get('relative_caption', ["No caption"] * len(reference_image))
-    input_captions = [f"a photo of $ that {cap}" for cap in relative_captions]
-    tokenized_input_captions = clip.tokenize(input_captions, context_length=77, truncate=True).to("cuda")
-    tokenized_input_captions2 = clip.tokenize(input_captions, context_length=77, truncate=True).to("cuda")
+        # Prepare input captions
+        relative_captions = batch.get('relative_caption', ["No caption"] * len(reference_image))
+        input_captions = [f"a photo of $ that {cap}" for cap in relative_captions]
+        tokenized_input_captions = clip.tokenize(input_captions, context_length=77, truncate=True).to("cuda")
+        # tokenized_input_captions2 = clip.tokenize(input_captions, context_length=77, truncate=True).to("cuda")
 
-    # Encode with pseudo tokens
-    _, pooled, conditioning = encode_with_pseudo_tokens_HF(clip_text_model1, tokenized_input_captions, predicted_tokens)
-    pooled2, _, conditioning2 = encode_with_pseudo_tokens_HF(clip_text_model2, tokenized_input_captions2, predicted_tokens2)
+        # Encode with pseudo tokens
+        _, pooled, conditioning = encode_with_pseudo_tokens_HF(clip_text_model1, tokenized_input_captions, predicted_tokens)
+        pooled2, _, conditioning2 = encode_with_pseudo_tokens_HF(clip_text_model2, tokenized_input_captions, predicted_tokens2)
 
-    # Save results
-    for idx in range(len(reference_image)):
-        save_dict = {
-            'pooled': pooled[idx].cpu().data,
-            'conditioning': conditioning[idx].cpu().data,
-            'pooled2': pooled2[idx].cpu().data,
-            'conditioning2': conditioning2[idx].cpu().data
-        }
+        # Save results
+        for idx in range(len(reference_image)):
+            save_dict = {
+                'pooled': pooled[idx].cpu(),
+                'conditioning': conditioning[idx].cpu(),
+                'pooled2': pooled2[idx].cpu(),
+                'conditioning2': conditioning2[idx].cpu()
+            }
 
-        torch.save(save_dict, os.path.join(text_embeddings_dir, f"{pairid[idx]}.pt"))
+            torch.save(save_dict, os.path.join(text_embeddings_dir, f"{pairid[idx]}.pt"))
        
