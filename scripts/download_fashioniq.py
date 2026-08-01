@@ -13,7 +13,7 @@ from tqdm import tqdm
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_TYPES = ["dress", "shirt", "toptee"]
-SPLITS = ["train", "val", "test"]
+SPLITS = ["train", "val", "test", "val2"]
 
 STOP = False
 
