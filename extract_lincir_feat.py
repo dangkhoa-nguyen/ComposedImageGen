@@ -33,6 +33,8 @@ parser.add_argument("--phi_path2", type=str, default=None,
                     help='Path to the checkpoint of the Phi model for CLIP-Giga.')
 parser.add_argument("--batch_size", type=int, default=1)
 parser.add_argument("--num_workers", type=int, default=4)
+parser.add_argument("--cache_dir", type=str, default="./hf_cache", help="HuggingFace cache directory")
+
 args = parser.parse_args()
 
 text_embeddings_dir = args.text_embeddings_dir
@@ -99,10 +101,10 @@ clip_preprocess = CLIPImageProcessor(
 )
 
 # Load CLIP models
-clip_text_model1 = CLIPTextModelWithProjection.from_pretrained(clip_model_name, torch_dtype=torch.float32).float().to("cuda")
-clip_vision_model1 = CLIPVisionModelWithProjection.from_pretrained(clip_model_name, torch_dtype=torch.float32).float().to("cuda")
-clip_text_model2 = CLIPTextModelWithProjection.from_pretrained(clip_model_name2, torch_dtype=torch.float32).float().to("cuda")
-clip_vision_model2 = CLIPVisionModelWithProjection.from_pretrained(clip_model_name2, torch_dtype=torch.float32).float().to("cuda")
+clip_text_model1 = CLIPTextModelWithProjection.from_pretrained(clip_model_name, torch_dtype=torch.float32, cache_dir=args.cache_dir).float().to("cuda")
+clip_vision_model1 = CLIPVisionModelWithProjection.from_pretrained(clip_model_name, torch_dtype=torch.float32, cache_dir=args.cache_dir).float().to("cuda")
+clip_text_model2 = CLIPTextModelWithProjection.from_pretrained(clip_model_name2, torch_dtype=torch.float32, cache_dir=args.cache_dir).float().to("cuda")
+clip_vision_model2 = CLIPVisionModelWithProjection.from_pretrained(clip_model_name2, torch_dtype=torch.float32, cache_dir=args.cache_dir).float().to("cuda")
 
 # Load Phi models
 phi = Phi(input_dim=768, hidden_dim=768 * 4, output_dim=768, dropout=0)
