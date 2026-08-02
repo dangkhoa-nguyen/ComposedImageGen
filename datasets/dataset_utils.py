@@ -115,55 +115,108 @@ class FashionIQDataset(Dataset):
         }
 
 
+# class ComposedEmbedsDataset(Dataset):
+#     """
+#     Dataset that loads saved composed embeddings(.pt) .
+#     Expects files saved as {pairid}.pt containing keys:
+#       - 'conditioning'  (Tensor [seq_len, d1] or [1, seq_len, d1])
+#       - 'conditioning2' (Tensor [seq_len, d2] or [1, seq_len, d2])
+#       - 'pooled2'       (Tensor [d2] or [1, d2])
+
+#     Returns for each item:
+#       {
+#         'pairid': str,
+#         'prompt_embeds': Tensor [seq_len, d1+d2],
+#         'pooled2': Tensor [d2]
+#       }
+#     """
+
+#     def __init__(self, dataset_path: str, text_embeddings_dir: str, split: str = 'val'):
+#         self.dataset_path = dataset_path
+#         self.text_embeddings_dir = text_embeddings_dir
+#         self.split = split
+
+#         # Load caption metadata to get pairids
+#         cap_path = os.path.join(dataset_path, f'captions/cap.rc2.{split}.json')
+#         with open(cap_path, 'r') as f:
+#             metadata = json.load(f)
+
+#         # Keep only entries with an existing .pt embedding file
+#         self.items = []
+#         for item in metadata:
+#             pairid = str(item['pairid'])
+#             pt_path = os.path.join(text_embeddings_dir, f"{pairid}.pt")
+#             if os.path.exists(pt_path):
+#                 self.items.append({'pairid': pairid, 'pt_path': pt_path})
+
+#     def __len__(self):
+#         return len(self.items)
+
+#     def __getitem__(self, idx):
+#         entry = self.items[idx]
+#         pairid = entry['pairid']
+#         pt_path = entry['pt_path']
+
+#         save_dict = torch.load(pt_path, map_location='cpu')
+
+#         cond1 = save_dict['conditioning']  # [seq_len, d1] or [1, seq_len, d1]
+#         cond2 = save_dict['conditioning2'] # [seq_len, d2] or [1, seq_len, d2]
+#         pooled2 = save_dict['pooled2']     # [d2] or [1, d2]
+
+#         # Normalize shapes to [seq_len, d]
+#         if cond1.dim() == 3:
+#             cond1 = cond1.squeeze(0)
+#         if cond2.dim() == 3:
+#             cond2 = cond2.squeeze(0)
+#         if pooled2.dim() == 2:
+#             pooled2 = pooled2.squeeze(0)
+
+#         prompt_embeds = torch.concat([cond1, cond2], dim=-1)
+
+#         return {
+#             'pairid': pairid,
+#             'prompt_embeds': prompt_embeds,  # CPU tensor; caller can .to('cuda')
+#             'pooled2': pooled2,
+#         }
+
 class ComposedEmbedsDataset(Dataset):
     """
-    Dataset that loads saved composed embeddings(.pt) .
-    Expects files saved as {pairid}.pt containing keys:
-      - 'conditioning'  (Tensor [seq_len, d1] or [1, seq_len, d1])
-      - 'conditioning2' (Tensor [seq_len, d2] or [1, seq_len, d2])
-      - 'pooled2'       (Tensor [d2] or [1, d2])
+    Dataset for loading composed text embeddings.
 
-    Returns for each item:
-      {
-        'pairid': str,
-        'prompt_embeds': Tensor [seq_len, d1+d2],
-        'pooled2': Tensor [d2]
-      }
+    It simply scans a directory for *.pt files, making it
+    dataset-agnostic (CIRR / FashionIQ / CIRCO / ...).
     """
 
-    def __init__(self, dataset_path: str, text_embeddings_dir: str, split: str = 'val'):
-        self.dataset_path = dataset_path
+    def __init__(self, text_embeddings_dir):
+        if not os.path.isdir(text_embeddings_dir):
+            raise FileNotFoundError(f"Embedding directory not found: {text_embeddings_dir}")
+            
         self.text_embeddings_dir = text_embeddings_dir
-        self.split = split
-
-        # Load caption metadata to get pairids
-        cap_path = os.path.join(dataset_path, f'captions/cap.rc2.{split}.json')
-        with open(cap_path, 'r') as f:
-            metadata = json.load(f)
-
-        # Keep only entries with an existing .pt embedding file
-        self.items = []
-        for item in metadata:
-            pairid = str(item['pairid'])
-            pt_path = os.path.join(text_embeddings_dir, f"{pairid}.pt")
-            if os.path.exists(pt_path):
-                self.items.append({'pairid': pairid, 'pt_path': pt_path})
+        self.files = sorted(
+            f
+            for f in os.listdir(text_embeddings_dir)
+            if f.endswith(".pt")
+        )
 
     def __len__(self):
-        return len(self.items)
+        return len(self.files)
 
     def __getitem__(self, idx):
-        entry = self.items[idx]
-        pairid = entry['pairid']
-        pt_path = entry['pt_path']
+        filename = self.files[idx]
+        pairid = os.path.splitext(filename)[0]
 
-        save_dict = torch.load(pt_path, map_location='cpu')
+        save_dict = torch.load(
+            os.path.join(
+                self.text_embeddings_dir,
+                filename
+            ),
+            map_location="cpu"
+        )
 
-        cond1 = save_dict['conditioning']  # [seq_len, d1] or [1, seq_len, d1]
-        cond2 = save_dict['conditioning2'] # [seq_len, d2] or [1, seq_len, d2]
-        pooled2 = save_dict['pooled2']     # [d2] or [1, d2]
+        cond1 = save_dict["conditioning"]
+        cond2 = save_dict["conditioning2"]
+        pooled2 = save_dict["pooled2"]
 
-        # Normalize shapes to [seq_len, d]
         if cond1.dim() == 3:
             cond1 = cond1.squeeze(0)
         if cond2.dim() == 3:
@@ -171,10 +224,10 @@ class ComposedEmbedsDataset(Dataset):
         if pooled2.dim() == 2:
             pooled2 = pooled2.squeeze(0)
 
-        prompt_embeds = torch.concat([cond1, cond2], dim=-1)
+        prompt_embeds = torch.cat([cond1, cond2], dim=-1)
 
         return {
-            'pairid': pairid,
-            'prompt_embeds': prompt_embeds,  # CPU tensor; caller can .to('cuda')
-            'pooled2': pooled2,
+            "pairid": pairid,
+            "prompt_embeds": prompt_embeds,
+            "pooled2": pooled2,
         }
