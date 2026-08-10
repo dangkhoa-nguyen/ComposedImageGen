@@ -1,6 +1,6 @@
-torch==2.0.0+cu118
-torchvision==0.15.1+cu118
-torchaudio==2.0.1+cu118
+# torch==2.0.0+cu118
+# torchvision==0.15.1+cu118
+# torchaudio==2.0.1+cu118
 
 transformers==4.40.2
 accelerate==1.0.1
@@ -12,7 +12,7 @@ safetensors==0.4.5
 peft==0.7.0
 ftfy==6.2.0
 
-clip @ git+https://github.com/openai/CLIP.git@a1d071733d7111c9c014f024669f959182114e33
+# clip @ git+https://github.com/openai/CLIP.git@a1d071733d7111c9c014f024669f959182114e33
 
 albumentations==1.4.6
 opencv-python-headless==4.9.0.80
