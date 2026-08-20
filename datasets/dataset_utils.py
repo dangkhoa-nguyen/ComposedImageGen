@@ -39,33 +39,6 @@ class CIRRDataset(Dataset):
         }
 
 
-# class FashionIQDataset(Dataset):
-#     def __init__(self, dataset_path, split='test', dress_types=['dress', 'shirt', 'toptee'], preprocess=None):
-#         self.dataset_path = dataset_path
-#         self.split = split
-#         self.dress_types = dress_types
-#         self.preprocess = preprocess
-#         # Load dataset metadata
-#         self.metadata = []
-#         for dress_type in dress_types:
-#             with open(os.path.join(dataset_path, f'{dress_type}_{split}_metadata.json'), 'r') as f:
-#                 self.metadata.extend(json.load(f))
-
-#     def __len__(self):
-#         return len(self.metadata)
-
-#     def __getitem__(self, idx):
-#         item = self.metadata[idx]
-#         reference_image_path = os.path.join(self.dataset_path, 'images', item['reference_image'])
-#         reference_image = Image.open(reference_image_path).convert('RGB')
-#         if self.preprocess:
-#             reference_image = self.preprocess(reference_image)['pixel_values'][0]
-
-#         return {
-#             'reference_image': reference_image,
-#             'relative_caption': item['relative_caption']
-#         }
-
 class FashionIQDataset(Dataset):
     def __init__(self, dataset_path, split="val", dress_types=("dress", "shirt", "toptee"), preprocess=None):
         self.dataset_path = dataset_path
@@ -115,69 +88,61 @@ class FashionIQDataset(Dataset):
         }
 
 
-# class ComposedEmbedsDataset(Dataset):
-#     """
-#     Dataset that loads saved composed embeddings(.pt) .
-#     Expects files saved as {pairid}.pt containing keys:
-#       - 'conditioning'  (Tensor [seq_len, d1] or [1, seq_len, d1])
-#       - 'conditioning2' (Tensor [seq_len, d2] or [1, seq_len, d2])
-#       - 'pooled2'       (Tensor [d2] or [1, d2])
+class CIRCODataset(Dataset):
+    def __init__(self, dataset_path, split="val", preprocess=None):
+        self.dataset_path = dataset_path
+        self.split = split
+        self.preprocess = preprocess
 
-#     Returns for each item:
-#       {
-#         'pairid': str,
-#         'prompt_embeds': Tensor [seq_len, d1+d2],
-#         'pooled2': Tensor [d2]
-#       }
-#     """
+        annotation_file = os.path.join(
+            dataset_path,
+            "annotations",
+            f"{split}.json"
+        )
 
-#     def __init__(self, dataset_path: str, text_embeddings_dir: str, split: str = 'val'):
-#         self.dataset_path = dataset_path
-#         self.text_embeddings_dir = text_embeddings_dir
-#         self.split = split
+        if not os.path.exists(annotation_file):
+            raise FileNotFoundError(f"CIRCO annotation file not found: {annotation_file}")
 
-#         # Load caption metadata to get pairids
-#         cap_path = os.path.join(dataset_path, f'captions/cap.rc2.{split}.json')
-#         with open(cap_path, 'r') as f:
-#             metadata = json.load(f)
+        with open(annotation_file, "r") as f:
+            self.metadata = json.load(f)
 
-#         # Keep only entries with an existing .pt embedding file
-#         self.items = []
-#         for item in metadata:
-#             pairid = str(item['pairid'])
-#             pt_path = os.path.join(text_embeddings_dir, f"{pairid}.pt")
-#             if os.path.exists(pt_path):
-#                 self.items.append({'pairid': pairid, 'pt_path': pt_path})
+        self.image_dir = os.path.join(
+            dataset_path,
+            "COCO2017_unlabeled",
+            "unlabeled2017"
+        )
 
-#     def __len__(self):
-#         return len(self.items)
+        if not os.path.isdir(self.image_dir):
+            raise FileNotFoundError(f"CIRCO image directory not found: {self.image_dir}")
 
-#     def __getitem__(self, idx):
-#         entry = self.items[idx]
-#         pairid = entry['pairid']
-#         pt_path = entry['pt_path']
+    def __len__(self):
+        return len(self.metadata)
 
-#         save_dict = torch.load(pt_path, map_location='cpu')
+    def _get_image_path(self, image_id):
+        image_filename = f"{int(image_id):012d}.jpg"
+        return os.path.join(self.image_dir, image_filename)
 
-#         cond1 = save_dict['conditioning']  # [seq_len, d1] or [1, seq_len, d1]
-#         cond2 = save_dict['conditioning2'] # [seq_len, d2] or [1, seq_len, d2]
-#         pooled2 = save_dict['pooled2']     # [d2] or [1, d2]
+    def __getitem__(self, idx):
+        item = self.metadata[idx]
 
-#         # Normalize shapes to [seq_len, d]
-#         if cond1.dim() == 3:
-#             cond1 = cond1.squeeze(0)
-#         if cond2.dim() == 3:
-#             cond2 = cond2.squeeze(0)
-#         if pooled2.dim() == 2:
-#             pooled2 = pooled2.squeeze(0)
+        reference_img_id = item["reference_img_id"]
+        reference_image_path = self._get_image_path(reference_img_id)
 
-#         prompt_embeds = torch.concat([cond1, cond2], dim=-1)
+        if not os.path.exists(reference_image_path):
+            raise FileNotFoundError(f"Reference image not found: {reference_image_path}")
 
-#         return {
-#             'pairid': pairid,
-#             'prompt_embeds': prompt_embeds,  # CPU tensor; caller can .to('cuda')
-#             'pooled2': pooled2,
-#         }
+        reference_image = Image.open(reference_image_path).convert("RGB")
+
+        if self.preprocess is not None:
+            reference_image = self.preprocess(
+                reference_image
+            )["pixel_values"][0]
+
+        return {
+            "reference_image": reference_image,
+            "relative_caption": item["relative_caption"],
+            "pairid": str(item["id"])
+        }
 
 class ComposedEmbedsDataset(Dataset):
     """

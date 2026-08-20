@@ -5,7 +5,7 @@ import clip
 from PIL import Image, ImageFile
 from transformers import CLIPTextModelWithProjection, CLIPVisionModelWithProjection, CLIPImageProcessor
 from phi import Phi
-from datasets.dataset_utils import CIRRDataset, FashionIQDataset
+from datasets.dataset_utils import CIRRDataset, CIRCODataset, FashionIQDataset
 import argparse
 from tqdm.auto import tqdm
 
@@ -15,7 +15,7 @@ Image.MAX_IMAGE_PIXELS = 933120000
 
 # Argument parser for dataset selection
 parser = argparse.ArgumentParser(description="Choose dataset to load")
-parser.add_argument('--dataset', type=str, choices=['cirr', 'fashioniq'], default='cirr',
+parser.add_argument('--dataset', type=str, choices=['cirr', 'circo', 'fashioniq'], default='cirr',
                     help="Specify the dataset to load: 'cirr' or 'fashioniq'")
 parser.add_argument('--text_embeddings_dir', type=str,
                     default="/path/to/embedded_text_lincir_cirr_test/",
@@ -118,6 +118,9 @@ phi_2 = phi_2.to(device="cuda").eval()
 if args.dataset == 'cirr':
     dataset_path = args.dataset_path if args.dataset_path is not None else "/path/to/cirr/dataset"
     dataset = CIRRDataset(dataset_path, split=args.split, preprocess=clip_preprocess)
+elif args.dataset == 'circo':
+    dataset_path = args.dataset_path if args.dataset_path is not None else "/path/to/circo/dataset"
+    dataset = CIRCODataset(dataset_path, split=args.split, preprocess=clip_preprocess)
 elif args.dataset == 'fashioniq':
     dataset_path = args.dataset_path if args.dataset_path is not None else "/path/to/fashioniq/dataset"
     dataset = FashionIQDataset(dataset_path, split=args.split, dress_types=args.dress_types, preprocess=clip_preprocess)
@@ -166,4 +169,3 @@ with torch.inference_mode():
             }
 
             torch.save(save_dict, os.path.join(text_embeddings_dir, f"{pairid[idx]}.pt"))
-       
