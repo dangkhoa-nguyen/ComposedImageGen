@@ -353,10 +353,28 @@ class CIRCODataset(Dataset):
         with open(dataset_path / 'COCO2017_unlabeled' / "annotations" / "image_info_unlabeled2017.json", "r") as f:
             imgs_info = json.load(f)
 
-        self.img_paths = [dataset_path / 'COCO2017_unlabeled' / "unlabeled2017" / img_info["file_name"] for img_info in
-                          imgs_info["images"]]
-        self.img_ids = [img_info["id"] for img_info in imgs_info["images"]]
-        self.img_ids_indexes_map = {str(img_id): i for i, img_id in enumerate(self.img_ids)}
+        image_dir = dataset_path / 'COCO2017_unlabeled' / 'unlabeled2017'
+
+        # Build gallery only from images that actually exist on disk.
+        # This allows evaluation with a downloaded subset of COCO instead of requiring all 123,403 COCO Unlabeled images.
+        self.img_paths = []
+        self.img_ids = []
+
+        for img_info in imgs_info["images"]:
+            img_path = image_dir / img_info["file_name"]
+
+            if img_path.is_file():
+                self.img_paths.append(img_path)
+                self.img_ids.append(img_info["id"])
+
+        self.img_ids_indexes_map = {
+            str(img_id): i for i, img_id in enumerate(self.img_ids)
+        }
+
+        print(
+            f"COCO gallery: {len(self.img_ids)} images found on disk "
+            f"(metadata contains {len(imgs_info['images'])} images)"
+        )
 
         # get CIRCO annotations
         with open(dataset_path / 'annotations' / f'{split}.json', "r") as f:
