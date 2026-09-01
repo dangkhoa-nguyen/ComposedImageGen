@@ -25,7 +25,9 @@ import time
 @torch.no_grad()
 def cirr_generate_test_submission_file(dataset_path: str, clip_model_name: str, ref_names_list: List[str],
                                        pseudo_tokens: torch.Tensor, preprocess: callable, submission_name: str,
-                                       generated_image_dir: Optional[str] = None) -> None:
+                                       generated_image_dir: Optional[str] = None,
+                                       lambda1: Optional[float] = None,
+                                       lambda2: Optional[float] = None) -> None:
     """
     Generate the test submission file for the CIRR dataset given the pseudo tokens
     """
@@ -44,7 +46,7 @@ def cirr_generate_test_submission_file(dataset_path: str, clip_model_name: str, 
     # Get the predictions dicts
     pairid_to_retrieved_images, pairid_to_group_retrieved_images = \
         cirr_generate_test_dicts(relative_test_dataset, clip_model, index_features, index_names,
-                                 ref_names_list, pseudo_tokens)
+                                 ref_names_list, pseudo_tokens, lambda1, lambda2)
 
     submission = {
         'version': 'rc2',
@@ -69,7 +71,8 @@ def cirr_generate_test_submission_file(dataset_path: str, clip_model_name: str, 
 
 
 def cirr_generate_test_dicts(relative_test_dataset: CIRRDataset, clip_model: CLIP, index_features: torch.Tensor,
-                             index_names: List[str], ref_names_list: List[str], pseudo_tokens: List[str]) \
+                             index_names: List[str], ref_names_list: List[str], pseudo_tokens: List[str],
+                             lambda1: Optional[float] = None, lambda2: Optional[float] = None) \
         -> Tuple[Dict[str, List[str]], Dict[str, List[str]]]:
     """
     Generate the test submission dicts for the CIRR dataset given the pseudo tokens
@@ -77,7 +80,7 @@ def cirr_generate_test_dicts(relative_test_dataset: CIRRDataset, clip_model: CLI
 
     # Get the predicted features
     predicted_features, reference_names, pairs_id, group_members = \
-        cirr_generate_test_predictions(clip_model, relative_test_dataset, ref_names_list, pseudo_tokens)
+        cirr_generate_test_predictions(clip_model, relative_test_dataset, ref_names_list, pseudo_tokens, lambda1, lambda2)
 
     print(f"Compute CIRR prediction dicts")
 
@@ -138,11 +141,15 @@ def slerp_batch(v0, v1, t):
     return interpolated
 
 def cirr_generate_test_predictions(clip_model: CLIP, relative_test_dataset: CIRRDataset, ref_names_list: List[str],
-                                   pseudo_tokens: torch.Tensor) -> \
+                                   pseudo_tokens: torch.Tensor, 
+                                   lambda1: Optional[float] = None, 
+                                   lambda2: Optional[float] = None) -> \
         Tuple[torch.Tensor, List[str], List[str], List[List[str]]]:
     """
     Generate the test prediction features for the CIRR dataset given the pseudo tokens
     """
+    lambda1 = 0.5 if lambda1 is None else lambda1
+    lambda2 = 0.5 if lambda2 is None else lambda2
 
     # Create the test dataloader
     relative_test_loader = DataLoader(dataset=relative_test_dataset, batch_size=32, num_workers=10,
@@ -173,7 +180,7 @@ def cirr_generate_test_predictions(clip_model: CLIP, relative_test_dataset: CIRR
         text_features = encode_with_pseudo_tokens(clip_model, tokenized_input_captions,batch_tokens)
         text_features_gen = encode_with_pseudo_tokens(clip_model, tokenized_input_captions,batch_tokens_gen)
 
-        predicted_features =F.normalize( F.normalize(text_features)*0.5+F.normalize(text_features_gen)*0.5)
+        predicted_features =F.normalize( F.normalize(text_features)*lambda1 + F.normalize(text_features_gen)*lambda2)
         predicted_features_list.append(predicted_features)
         reference_names_list.extend(reference_names)
         pair_id_list.extend(pairs_id)
@@ -189,7 +196,9 @@ def circo_generate_test_submission_file(dataset_path: str, clip_model_name: str,
                                         pseudo_tokens: torch.Tensor, preprocess: callable,
                                         submission_name: str,
                                         generated_image_dir: Optional[str] = None,
-                                        split: str = 'test') -> None:
+                                        split: str = 'test',
+                                        lambda1: Optional[float] = None,
+                                        lambda2: Optional[float] = None) -> None:
     """
     Generate the test submission file for the CIRCO dataset given the pseudo tokens
     """
@@ -207,7 +216,7 @@ def circo_generate_test_submission_file(dataset_path: str, clip_model_name: str,
 
     # Get the predictions dict
     queryid_to_retrieved_images = circo_generate_test_dict(relative_test_dataset, clip_model, index_features,
-                                                           index_names, ref_names_list, pseudo_tokens)
+                                                           index_names, ref_names_list, pseudo_tokens, lambda1, lambda2)
 
     submissions_folder_path = PROJECT_ROOT / 'data' / "test_submissions" / 'circo'
     submissions_folder_path.mkdir(exist_ok=True, parents=True)
@@ -217,10 +226,14 @@ def circo_generate_test_submission_file(dataset_path: str, clip_model_name: str,
 
 
 def circo_generate_test_predictions(clip_model: CLIP, relative_test_dataset: CIRCODataset, ref_names_list: List[str],
-                                    pseudo_tokens: torch.Tensor) -> Tuple[torch.Tensor, List[List[str]]]:
+                                    pseudo_tokens: torch.Tensor,
+                                    lambda1: Optional[float] = None,
+                                    lambda2: Optional[float] = None) -> Tuple[torch.Tensor, List[List[str]]]:
     """
     Generate the test prediction features for the CIRCO dataset given the pseudo tokens
     """
+    lambda1 = 0.7 if lambda1 is None else lambda1
+    lambda2 = 0.3 if lambda2 is None else lambda2
 
     # Create the test dataloader
     relative_test_loader = DataLoader(dataset=relative_test_dataset, batch_size=32, num_workers=10,
@@ -243,7 +256,7 @@ def circo_generate_test_predictions(clip_model: CLIP, relative_test_dataset: CIR
         batch_tokens_gen = torch.vstack([pseudo_tokens[1][ref_names_list.index(ref)].unsqueeze(0) for ref in query_ids])
         text_features_gen = encode_with_pseudo_tokens(clip_model, tokenized_input_captions, batch_tokens_gen)
 
-        predicted_features = F.normalize(F.normalize(text_features) * 0.7 + F.normalize(text_features_gen) * 0.3)
+        predicted_features = F.normalize(F.normalize(text_features) * lambda1 + F.normalize(text_features_gen) * lambda2)
   
 
         predicted_features_list.append(predicted_features)
@@ -254,7 +267,8 @@ def circo_generate_test_predictions(clip_model: CLIP, relative_test_dataset: CIR
 
 
 def circo_generate_test_dict(relative_test_dataset: CIRCODataset, clip_model: CLIP, index_features: torch.Tensor,
-                             index_names: List[str], ref_names_list: List[str], pseudo_tokens: torch.Tensor) \
+                             index_names: List[str], ref_names_list: List[str], pseudo_tokens: torch.Tensor,
+                             lambda1: Optional[float] = None, lambda2: Optional[float] = None) \
         -> Dict[str, List[str]]:
     """
     Generate the test submission dicts for the CIRCO dataset given the pseudo tokens
@@ -262,7 +276,7 @@ def circo_generate_test_dict(relative_test_dataset: CIRCODataset, clip_model: CL
 
     # Get the predicted features
     predicted_features, query_ids = circo_generate_test_predictions(clip_model, relative_test_dataset,
-                                                                    ref_names_list, pseudo_tokens)
+                                                                    ref_names_list, pseudo_tokens, lambda1, lambda2)
 
     # Normalize the features
     index_features = index_features.float().to(device)
@@ -300,6 +314,8 @@ def main():
                         help="Directory containing generated images")
     parser.add_argument("--split", type=str, default="test", choices=["test", "val"],
                         help="Dataset split to evaluate")
+    parser.add_argument("--lambda1", type=float, help="Weight for the reference-image text feature.")
+    parser.add_argument("--lambda2", type=float, help="Weight for the generated-image text feature.")
 
     args = parser.parse_args()
 
@@ -392,12 +408,14 @@ def main():
     if args.dataset == 'cirr':
         cirr_generate_test_submission_file(
             args.dataset_path, clip_model_name, ref_names_list, pseudo_tokens,
-            preprocess, args.submission_name, generated_image_dir=args.generated_image_dir
+            preprocess, args.submission_name, generated_image_dir=args.generated_image_dir,
+            lambda1=args.lambda1, lambda2=args.lambda2
         )
     elif args.dataset == 'circo':
         circo_generate_test_submission_file(
             args.dataset_path, clip_model_name, ref_names_list, pseudo_tokens,
-            preprocess, args.submission_name, generated_image_dir=args.generated_image_dir, split=args.split
+            preprocess, args.submission_name, generated_image_dir=args.generated_image_dir, split=args.split,
+            lambda1=args.lambda1, lambda2=args.lambda2
         )
 
     else:
