@@ -29,39 +29,28 @@ DEFAULT_TIMEOUT = 30
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Download a small subset of COCO 2017 Unlabeled images required by CIRCO val set.")
-
     parser.add_argument("--dataset-root", type=Path, required=True,
         help="Path to the CIRCO dataset root. Example: /data/CIRCO")
-
     parser.add_argument("--split", choices=("val", "test"), default=DEFAULT_SPLIT,
         help=f"CIRCO split to use (default: {DEFAULT_SPLIT})")
-
     parser.add_argument("--num-random", type=int, default=DEFAULT_NUM_RANDOM, metavar="N",
         help=f"Number of additional random COCO images to download (default: {DEFAULT_NUM_RANDOM})")
-
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED,
         help=f"Random seed for reproducible image selection (default: {DEFAULT_SEED})")
-
     parser.add_argument("--output-dir", type=Path, default=None, metavar="PATH",
         help="Directory where COCO images will be stored. Default: <dataset-root>/COCO2017_unlabeled/unlabeled2017")
-
     parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS, metavar="N",
         help=f"Number of concurrent download workers (default: {DEFAULT_WORKERS})")
-
     parser.add_argument("--retries", type=int, default=DEFAULT_RETRIES, metavar="N",
         help=f"Number of retries after an initial failed download (default: {DEFAULT_RETRIES})")
-
     parser.add_argument("--dry-run", action="store_true",
         help="Show what would be downloaded without downloading anything.")
-
     args = parser.parse_args()
 
     if args.num_random < 0:
         parser.error("--num-random must be >= 0")
-
     if args.workers < 1:
         parser.error("--workers must be >= 1")
-
     if args.retries < 0:
         parser.error("--retries must be >= 0")
 
