@@ -16,7 +16,7 @@ from data_utils import PROJECT_ROOT, targetpad_transform
 from datasets import CIRRDataset, CIRCODataset
 from encode_with_pseudo_tokens import encode_with_pseudo_tokens
 from phi import Phi
-from utils_feat import extract_image_features, device, collate_fn, extract_pseudo_tokens_with_phi
+from utils_feat import extract_image_features, device, collate_fn, extract_pseudo_tokens_with_phi, extract_composed_features
 
 
 import time
@@ -197,6 +197,7 @@ def circo_generate_test_submission_file(dataset_path: str, clip_model_name: str,
                                         submission_name: str,
                                         generated_image_dir: Optional[str] = None,
                                         split: str = 'test',
+                                        phi: Phi = None,
                                         lambda1: Optional[float] = None,
                                         lambda2: Optional[float] = None) -> None:
     """
@@ -209,7 +210,7 @@ def circo_generate_test_submission_file(dataset_path: str, clip_model_name: str,
 
     # Compute the index features
     classic_test_dataset = CIRCODataset(dataset_path, split, 'classic', preprocess)
-    index_features, index_names = extract_image_features(classic_test_dataset, clip_model)
+    index_features, index_names = extract_composed_features(classic_test_dataset, clip_model, phi)
 
     relative_test_dataset = CIRCODataset(dataset_path, split, 'relative', preprocess,
                                          generated_image_dir=generated_image_dir)
@@ -415,7 +416,7 @@ def main():
         circo_generate_test_submission_file(
             args.dataset_path, clip_model_name, ref_names_list, pseudo_tokens,
             preprocess, args.submission_name, generated_image_dir=args.generated_image_dir, split=args.split,
-            lambda1=args.lambda1, lambda2=args.lambda2
+            phi=phi, lambda1=args.lambda1, lambda2=args.lambda2
         )
 
     else:

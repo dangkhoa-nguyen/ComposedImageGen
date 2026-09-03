@@ -10,6 +10,9 @@ from tqdm import tqdm
 from data_utils import collate_fn
 from phi import Phi
 
+import clip
+from encode_with_pseudo_tokens import encode_with_pseudo_tokens
+
 if torch.cuda.is_available():
     device = torch.device("cuda")
     dtype = torch.float16
@@ -53,6 +56,61 @@ def extract_image_features(dataset: Dataset, clip_model: CLIP, batch_size: Optio
     index_features = torch.vstack(index_features)
     return index_features, index_names
 
+@torch.no_grad()
+def extract_composed_features(dataset: Dataset, clip_model: CLIP, phi: Phi, batch_size: Optional[int] = 32, 
+                                num_workers: Optional[int] = 10) -> Tuple[torch.Tensor, List[str]]:
+    """
+    Extract composed/textualized features from gallery images.
+    Each gallery image is:
+        image -> CLIP image feature -> Phi pseudo token -> CLIP text encoder -> text feature
+    """
+
+    loader = DataLoader(dataset=dataset, batch_size=batch_size,
+                        num_workers=num_workers, pin_memory=True, collate_fn=collate_fn)
+
+    index_features = []
+    index_names = []
+    print(f"extracting composed features {dataset.__class__.__name__}")
+
+    for batch in tqdm(loader):
+        images = batch.get('image')
+        names = batch.get('image_name')
+
+        if images is None:
+            images = batch.get('reference_image')
+        if names is None:
+            names = batch.get('reference_name')
+        images = images.to(device)
+
+        # 1. Gallery image -> CLIP image feature
+        image_features = clip_model.encode_image(images)
+
+        # 2. CLIP image feature -> pseudo token
+        pseudo_tokens = phi(image_features)
+
+        # 3. Pseudo token -> CLIP text feature
+        batch_size_actual = images.shape[0]
+
+        input_captions = [
+            "a photo of $" for _ in range(batch_size_actual)
+        ]
+
+        tokenized_input_captions = clip.tokenize(
+            input_captions,
+            context_length=77
+        ).to(device)
+
+        text_features = encode_with_pseudo_tokens(
+            clip_model,
+            tokenized_input_captions,
+            pseudo_tokens
+        )
+
+        index_features.append(text_features.cpu())
+        index_names.extend(names)
+
+    index_features = torch.vstack(index_features)
+    return index_features, index_names
 
 def contrastive_loss(v1: torch.Tensor, v2: torch.Tensor, temperature: float) -> torch.Tensor:
     # Based on https://github.com/NVlabs/PALAVRA/blob/main/utils/nv.py
