@@ -197,7 +197,7 @@ def circo_generate_test_submission_file(dataset_path: str, clip_model_name: str,
                                         submission_name: str,
                                         generated_image_dir: Optional[str] = None,
                                         split: str = 'test',
-                                        phi: Phi = None,
+                                        phi: Phi = None, alpha: float = 1.0,
                                         lambda1: Optional[float] = None,
                                         lambda2: Optional[float] = None) -> None:
     """
@@ -210,14 +210,22 @@ def circo_generate_test_submission_file(dataset_path: str, clip_model_name: str,
 
     # Compute the index features
     classic_test_dataset = CIRCODataset(dataset_path, split, 'classic', preprocess)
-    index_features, index_names = extract_composed_features(classic_test_dataset, clip_model, phi)
+    # index_features, index_names = extract_composed_features(classic_test_dataset, clip_model, phi)
+    index_image_features, index_names = extract_image_features(classic_test_dataset, clip_model)
+    # Only extract textualized gallery features when they are actually used
+    if alpha < 1.0:
+        if phi is None:
+            raise ValueError("Phi/SEARLE is required when alpha < 1.0.")
+        index_text_features, _ = extract_composed_features(classic_test_dataset, clip_model, phi)
+    else:
+        index_text_features = None
 
     relative_test_dataset = CIRCODataset(dataset_path, split, 'relative', preprocess,
                                          generated_image_dir=generated_image_dir)
 
     # Get the predictions dict
-    queryid_to_retrieved_images = circo_generate_test_dict(relative_test_dataset, clip_model, index_features,
-                                                           index_names, ref_names_list, pseudo_tokens, lambda1, lambda2)
+    queryid_to_retrieved_images = circo_generate_test_dict(relative_test_dataset, clip_model, index_image_features, index_text_features,
+                                                           index_names, ref_names_list, pseudo_tokens, alpha, lambda1, lambda2)
 
     submissions_folder_path = PROJECT_ROOT / 'data' / "test_submissions" / 'circo'
     submissions_folder_path.mkdir(exist_ok=True, parents=True)
@@ -267,8 +275,8 @@ def circo_generate_test_predictions(clip_model: CLIP, relative_test_dataset: CIR
     return predicted_features, query_ids_list
 
 
-def circo_generate_test_dict(relative_test_dataset: CIRCODataset, clip_model: CLIP, index_features: torch.Tensor,
-                             index_names: List[str], ref_names_list: List[str], pseudo_tokens: torch.Tensor,
+def circo_generate_test_dict(relative_test_dataset: CIRCODataset, clip_model: CLIP, index_image_features: torch.Tensor, index_text_features: Optional[torch.Tensor]
+                             index_names: List[str], ref_names_list: List[str], pseudo_tokens: torch.Tensor, alpha: float = 1.0,
                              lambda1: Optional[float] = None, lambda2: Optional[float] = None) \
         -> Dict[str, List[str]]:
     """
@@ -279,12 +287,31 @@ def circo_generate_test_dict(relative_test_dataset: CIRCODataset, clip_model: CL
     predicted_features, query_ids = circo_generate_test_predictions(clip_model, relative_test_dataset,
                                                                     ref_names_list, pseudo_tokens, lambda1, lambda2)
 
-    # Normalize the features
-    index_features = index_features.float().to(device)
-    index_features = F.normalize(index_features, dim=-1)
+    # Normalize gallery image features
+    index_image_features = index_image_features.float().to(device)
+    index_image_features = F.normalize(index_image_features, dim=-1)
 
-    # Compute the similarity
-    similarity = predicted_features @ index_features.T
+    # Image similarity
+    similarity_image = predicted_features @ index_image_features.T
+
+    if alpha < 1.0:
+        if index_text_features is None:
+            raise ValueError("index_text_features is required when alpha < 1.0.")
+
+        # Normalize gallery textualized features
+        index_text_features = index_text_features.float().to(device)
+        index_text_features = F.normalize(index_text_features, dim=-1)
+
+        # Text similarity
+        similarity_text = predicted_features @ index_text_features.T
+
+        # Hybrid similarity
+        similarity = alpha * similarity_image + (1.0 - alpha) * similarity_text
+        
+    else:
+        # alpha = 1.0 -> original image-only baseline
+        similarity = similarity_image
+        
     sorted_indices = torch.topk(similarity, dim=-1, k=50).indices.cpu()
     sorted_index_names = np.array(index_names)[sorted_indices]
 
@@ -315,6 +342,11 @@ def main():
                         help="Directory containing generated images")
     parser.add_argument("--split", type=str, default="test", choices=["test", "val"],
                         help="Dataset split to evaluate")
+    parser.add_argument("--alpha", type=float, default=1.0,
+                        help="Weight for the original gallery image similarity in hybrid retrieval. "
+                             "alpha=1.0 uses only gallery image features (baseline); "
+                             "alpha=0.0 uses only gallery textualized features; "
+                             "0<alpha<1 combines both as alpha*image_similarity + (1-alpha)*text_similarity.")
     parser.add_argument("--lambda1", type=float, help="Weight for the reference-image text feature.")
     parser.add_argument("--lambda2", type=float, help="Weight for the generated-image text feature.")
 
@@ -416,7 +448,7 @@ def main():
         circo_generate_test_submission_file(
             args.dataset_path, clip_model_name, ref_names_list, pseudo_tokens,
             preprocess, args.submission_name, generated_image_dir=args.generated_image_dir, split=args.split,
-            phi=phi, lambda1=args.lambda1, lambda2=args.lambda2
+            phi=phi, alpha=args.alpha, lambda1=args.lambda1, lambda2=args.lambda2
         )
 
     else:
