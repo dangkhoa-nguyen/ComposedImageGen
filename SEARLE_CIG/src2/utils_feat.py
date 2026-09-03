@@ -91,9 +91,7 @@ def extract_composed_features(dataset: Dataset, clip_model: CLIP, phi: Phi, batc
         # 3. Pseudo token -> CLIP text feature
         batch_size_actual = images.shape[0]
 
-        input_captions = [
-            "a photo of $" for _ in range(batch_size_actual)
-        ]
+        input_captions = ["$" for _ in range(batch_size_actual)]
 
         tokenized_input_captions = clip.tokenize(
             input_captions,
