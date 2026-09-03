@@ -275,7 +275,7 @@ def circo_generate_test_predictions(clip_model: CLIP, relative_test_dataset: CIR
     return predicted_features, query_ids_list
 
 
-def circo_generate_test_dict(relative_test_dataset: CIRCODataset, clip_model: CLIP, index_image_features: torch.Tensor, index_text_features: Optional[torch.Tensor]
+def circo_generate_test_dict(relative_test_dataset: CIRCODataset, clip_model: CLIP, index_image_features: torch.Tensor, index_text_features: Optional[torch.Tensor],
                              index_names: List[str], ref_names_list: List[str], pseudo_tokens: torch.Tensor, alpha: float = 1.0,
                              lambda1: Optional[float] = None, lambda2: Optional[float] = None) \
         -> Dict[str, List[str]]:
