@@ -444,6 +444,7 @@ class CIRCODataset(Dataset):
 
                 return {
                     'reference_image': reference_img,
+                    'reference_image_path': str(reference_img_path),
                     'reference_name': reference_img_id,
                     'target_image': target_img,
                     'target_name': target_img_id,
@@ -458,6 +459,7 @@ class CIRCODataset(Dataset):
             elif self.split == 'test':
                 return {
                     'reference_image': reference_img,
+                    'reference_image_path': str(reference_img_path),
                     'reference_name': reference_img_id,
                     'relative_caption': relative_caption,
                     'shared_concept': shared_concept,

@@ -18,6 +18,9 @@ from encode_with_pseudo_tokens import encode_with_pseudo_tokens
 from phi import Phi
 from utils_feat import extract_image_features, device, collate_fn, extract_pseudo_tokens_with_phi
 
+from transformers import BlipProcessor, BlipForConditionalGeneration
+from PIL import Image
+
 
 import time
 
@@ -198,7 +201,9 @@ def circo_generate_test_submission_file(dataset_path: str, clip_model_name: str,
                                         generated_image_dir: Optional[str] = None,
                                         split: str = 'test',
                                         lambda1: Optional[float] = None,
-                                        lambda2: Optional[float] = None) -> None:
+                                        lambda2: Optional[float] = None,
+                                        blip_processor = None, blip_model = None,
+                                        lambda3: Optional[float] = None) -> None:
     """
     Generate the test submission file for the CIRCO dataset given the pseudo tokens
     """
@@ -215,25 +220,34 @@ def circo_generate_test_submission_file(dataset_path: str, clip_model_name: str,
                                          generated_image_dir=generated_image_dir)
 
     # Get the predictions dict
-    queryid_to_retrieved_images = circo_generate_test_dict(relative_test_dataset, clip_model, index_features,
-                                                           index_names, ref_names_list, pseudo_tokens, lambda1, lambda2)
+    queryid_to_retrieved_images, caption_lines, composed_caption_lines = circo_generate_test_dict(
+                                                            relative_test_dataset, clip_model, index_features,
+                                                            index_names, ref_names_list, pseudo_tokens, lambda1, lambda2,
+                                                            blip_processor, blip_model, lambda3)
 
     submissions_folder_path = PROJECT_ROOT / 'data' / "test_submissions" / 'circo'
     submissions_folder_path.mkdir(exist_ok=True, parents=True)
 
     with open(submissions_folder_path / f"{submission_name}.json", 'w+') as file:
         json.dump(queryid_to_retrieved_images, file, sort_keys=True)
+    with open(submissions_folder_path / f"{submission_name}_captions.txt", 'w', encoding='utf-8') as file:
+        file.write('\n'.join(caption_lines))
+    with open(submissions_folder_path / f"{submission_name}_composed_captions.txt", 'w', encoding='utf-8') as file:
+        file.write('\n'.join(composed_caption_lines))
 
 
 def circo_generate_test_predictions(clip_model: CLIP, relative_test_dataset: CIRCODataset, ref_names_list: List[str],
                                     pseudo_tokens: torch.Tensor,
                                     lambda1: Optional[float] = None,
-                                    lambda2: Optional[float] = None) -> Tuple[torch.Tensor, List[List[str]]]:
+                                    lambda2: Optional[float] = None,
+                                    blip_processor=None, blip_model=None,
+                                    lambda3: Optional[float] = None) -> Tuple[torch.Tensor, List[str], List[str], List[str]]:
     """
     Generate the test prediction features for the CIRCO dataset given the pseudo tokens
     """
     lambda1 = 0.7 if lambda1 is None else lambda1
     lambda2 = 0.3 if lambda2 is None else lambda2
+    lambda3 = 0.0 if lambda3 is None else lambda3
 
     # Create the test dataloader
     relative_test_loader = DataLoader(dataset=relative_test_dataset, batch_size=32, num_workers=10,
@@ -241,12 +255,41 @@ def circo_generate_test_predictions(clip_model: CLIP, relative_test_dataset: CIR
 
     predicted_features_list = []
     query_ids_list = []
+    caption_lines = []
+    composed_caption_lines = []
 
     # Compute the predictions
     for batch in tqdm(relative_test_loader):
         reference_names = batch['reference_name']
         relative_captions = batch['relative_caption']
         query_ids = batch['query_id']
+        reference_image_paths = batch['reference_image_path']
+
+        # Generate image captions using BLIP
+        images = [Image.open(image_path).convert("RGB") for image_path in reference_image_paths]
+        inputs = blip_processor(images=images, return_tensors="pt", padding=True).to(device)
+
+        with torch.no_grad():
+            output = blip_model.generate(**inputs, max_new_tokens=50)
+
+        image_captions = blip_processor.batch_decode(output, skip_special_tokens=True)
+
+        # Save captions
+        for query_id, caption in zip(query_ids, image_captions):
+            caption_lines.append(f"{query_id}: {caption}")
+
+        # Create captions for the caption branch
+        composed_captions = [
+            f"{image_caption.strip().lower()}, {relative_caption.strip().lower()}"
+            for image_caption, relative_caption in zip(image_captions, relative_captions)
+        ]
+        # Save composed captions
+        for query_id, composed_caption in zip(query_ids, composed_captions):
+            composed_caption_lines.append(f"{query_id}: {composed_caption}")
+        # Tokenize composed caption branch & encode
+        caption_tokens = clip.tokenize(composed_captions, context_length=77).to(device)
+        text_features_caption = clip_model.encode_text(caption_tokens)
+        text_features_caption = F.normalize(text_features_caption, dim=-1)
 
         input_captions = [f"a photo of $ that {caption}" for caption in relative_captions]
         batch_tokens = torch.vstack([pseudo_tokens[0][ref_names_list.index(ref)].unsqueeze(0) for ref in query_ids])
@@ -256,27 +299,35 @@ def circo_generate_test_predictions(clip_model: CLIP, relative_test_dataset: CIR
         batch_tokens_gen = torch.vstack([pseudo_tokens[1][ref_names_list.index(ref)].unsqueeze(0) for ref in query_ids])
         text_features_gen = encode_with_pseudo_tokens(clip_model, tokenized_input_captions, batch_tokens_gen)
 
-        predicted_features = F.normalize(F.normalize(text_features) * lambda1 + F.normalize(text_features_gen) * lambda2)
+        # predicted_features = F.normalize(F.normalize(text_features) * lambda1 + F.normalize(text_features_gen) * lambda2)
+        predicted_features = F.normalize(
+            F.normalize(text_features) * lambda1 +
+            F.normalize(text_features_gen) * lambda2 +
+            F.normalize(text_features_caption) * lambda3
+        )
   
 
         predicted_features_list.append(predicted_features)
         query_ids_list.extend(query_ids)
 
     predicted_features = torch.vstack(predicted_features_list)
-    return predicted_features, query_ids_list
+    return predicted_features, query_ids_list, caption_lines, composed_caption_lines
 
 
 def circo_generate_test_dict(relative_test_dataset: CIRCODataset, clip_model: CLIP, index_features: torch.Tensor,
                              index_names: List[str], ref_names_list: List[str], pseudo_tokens: torch.Tensor,
-                             lambda1: Optional[float] = None, lambda2: Optional[float] = None) \
+                             lambda1: Optional[float] = None, lambda2: Optional[float] = None,
+                             blip_processor=None, blip_model=None, lambda3: Optional[float] = None,) \
         -> Dict[str, List[str]]:
     """
     Generate the test submission dicts for the CIRCO dataset given the pseudo tokens
     """
 
     # Get the predicted features
-    predicted_features, query_ids = circo_generate_test_predictions(clip_model, relative_test_dataset,
-                                                                    ref_names_list, pseudo_tokens, lambda1, lambda2)
+    predicted_features, query_ids, caption_lines, composed_caption_lines = circo_generate_test_predictions(
+                                                                    clip_model, relative_test_dataset,
+                                                                    ref_names_list, pseudo_tokens, lambda1, lambda2,
+                                                                    blip_processor, blip_model, lambda3)
 
     # Normalize the features
     index_features = index_features.float().to(device)
@@ -291,7 +342,7 @@ def circo_generate_test_dict(relative_test_dataset: CIRCODataset, clip_model: CL
     queryid_to_retrieved_images = {query_id: query_sorted_names[:50].tolist() for
                                    (query_id, query_sorted_names) in zip(query_ids, sorted_index_names)}
 
-    return queryid_to_retrieved_images
+    return queryid_to_retrieved_images, caption_lines, composed_caption_lines
 
 
 def main():
@@ -316,6 +367,7 @@ def main():
                         help="Dataset split to evaluate")
     parser.add_argument("--lambda1", type=float, help="Weight for the reference-image text feature.")
     parser.add_argument("--lambda2", type=float, help="Weight for the generated-image text feature.")
+    parser.add_argument("--lambda3", type=float, help="Weight for the image captioning text feature.")
 
     args = parser.parse_args()
 
@@ -400,6 +452,13 @@ def main():
         # import pdb;pdb.set_trace()
         pseudo_tokens[0] = pseudo_tokens[0].to(device)
         pseudo_tokens[1] = pseudo_tokens[1].to(device)
+
+        # Load blip for image captioning
+        blip_processor = BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
+        blip_model = BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-captioning-base").to(device)
+
+        blip_model.eval()
+
     else:
         raise ValueError("Eval type not supported")
 
@@ -415,7 +474,8 @@ def main():
         circo_generate_test_submission_file(
             args.dataset_path, clip_model_name, ref_names_list, pseudo_tokens,
             preprocess, args.submission_name, generated_image_dir=args.generated_image_dir, split=args.split,
-            lambda1=args.lambda1, lambda2=args.lambda2
+            lambda1=args.lambda1, lambda2=args.lambda2,
+            blip_processor=blip_processor, blip_model=blip_model, lambda3=args.lambda3
         )
 
     else:
