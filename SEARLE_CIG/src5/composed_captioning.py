@@ -4,7 +4,7 @@ Generate composed captions for CIRCO queries.
 Supported models:
 - blip
 - Qwen/Qwen2.5-VL-3B-Instruct-AWQ
-- Qwen/Qwen3-VL-4B-Thinking-FP8
+- Qwen/Qwen3-VL-4B-Instruct-FP8
 
 Examples:
     python composed_captioning.py \
@@ -42,7 +42,7 @@ from qwen_vl_utils import process_vision_info
 BLIP_MODEL_NAME = "Salesforce/blip-image-captioning-base"
 QWEN_MODELS = (
     "Qwen/Qwen2.5-VL-3B-Instruct-AWQ",
-    "Qwen/Qwen3-VL-4B-Thinking-FP8",
+    "Qwen/Qwen3-VL-4B-Instruct-FP8",
 )
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "data" / "test_submissions" / "circo"
 
