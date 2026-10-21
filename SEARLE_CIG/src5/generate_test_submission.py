@@ -339,7 +339,7 @@ def circo_generate_test_predictions(clip_model: CLIP, relative_test_dataset: CIR
         raise ValueError("The CIRCO query dataset is empty.")
 
     predicted_features = torch.vstack(predicted_features_list)
-    return predicted_features, query_ids_lis
+    return predicted_features, query_ids_list
 
 
 def circo_generate_test_dict(relative_test_dataset: CIRCODataset, clip_model: CLIP, index_features: torch.Tensor,
