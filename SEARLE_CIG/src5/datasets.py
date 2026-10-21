@@ -425,8 +425,10 @@ class CIRCODataset(Dataset):
             reference_img_id = str(self.annotations[index]['reference_img_id'])
             reference_img_path = self.img_paths[self.img_ids_indexes_map[reference_img_id]]
             reference_img = self.preprocess(PIL.Image.open(reference_img_path))
-            generated_image_path = self.generated_image_dir / f"{int(query_id):05d}.png"
-            generated_image = self.preprocess(PIL.Image.open(str(generated_image_path)))
+            generated_image = None
+            if self.generated_image_dir is not None:
+                generated_image_path = self.generated_image_dir / f"{int(query_id):05d}.png"
+                generated_image = self.preprocess(PIL.Image.open(str(generated_image_path)))
 
             if self.split == 'val':
                 # Get the target image and ground truth images
@@ -437,10 +439,6 @@ class CIRCODataset(Dataset):
 
                 # Pad ground truth image IDs with zeros for collate_fn
                 gt_img_ids += [''] * (self.max_num_gts - len(gt_img_ids))
-
-                generated_image_path = self.generated_image_dir / f"{int(query_id):05d}.png"
-                generated_image = self.preprocess(PIL.Image.open(str(generated_image_path)))
-
 
                 return {
                     'reference_image': reference_img,
