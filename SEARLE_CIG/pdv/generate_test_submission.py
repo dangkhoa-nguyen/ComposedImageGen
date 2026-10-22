@@ -380,6 +380,7 @@ def circo_generate_test_predictions(clip_model: CLIP, relative_test_dataset: CIR
 
         predicted_features = F.normalize(combined_features, dim=-1)
 
+        # PDV_F calculation
         if use_pdv:
             # A. Tạo feature_text từ caption nền.
             base_captions = ["a photo of $" for _ in query_ids]
@@ -406,6 +407,7 @@ def circo_generate_test_predictions(clip_model: CLIP, relative_test_dataset: CIR
             # C. PDV
             predicted_features = calculate_pdv_features(feature_text=feature_text, feature_text_composed=predicted_features,
                                                         feature_image=feature_image, alpha_i=alpha_i, alpha_t=alpha_t, beta=beta)
+            predicted_features = predicted_features + F.normalize(combined_features, dim=-1)
 
         predicted_features_list.append(predicted_features)
         query_ids_list.extend(query_ids)
