@@ -235,6 +235,48 @@ def load_composed_captions(json_path: str) -> Dict[str, str]:
     return captions_by_id
 
 
+def calculate_pdv_features(feature_text: torch.Tensor, feature_text_composed: torch.Tensor, feature_image: torch.Tensor,
+                            alpha_i: float = 1.0, alpha_t: float = 1.0, beta: float = 1.0) -> torch.Tensor:
+    """
+    Calculates enhanced multimodal features using Prompt Difference Vector (PDV) approach.
+
+    Parameters:
+    - feature_text: Features extracted from the text branch of the VLM,
+                    representing the text-only encoding (e.g., from text inversion or captioning)
+    - feature_text_composed: Features of text with compositional prompt, representing
+                             text encoding with additional prompt information
+    - feature_image: Features extracted from the visual branch of the VLM,
+                     representing the visual-only encoding
+    - alpha_i: Scaling factor for applying PDV to image features (default=1)
+    - alpha_t: Scaling factor for applying PDV to text features (default=1)
+    - beta: Weighting factor for combining PDV-enhanced features (default=1)
+
+    Returns:
+    - Normalized combined feature vector enhanced with PDV
+    """
+    feature_text = F.normalize(feature_text.float(), dim=-1)
+    feature_text_composed = F.normalize(feature_text_composed.float(), dim=-1)
+    feature_image = F.normalize(feature_image.float(), dim=-1)
+
+    # Calculate the Prompt Difference Vector (PDV)
+    # This captures the semantic difference added by the compositional prompt
+    pdv = feature_text_composed - feature_text
+
+    # Apply PDV to image features with scaling factor alpha_i
+    # This enhances the image representation with prompt-related information
+    feature_PDVI = feature_image + alpha_i * pdv
+
+    # Apply PDV to text features with scaling factor alpha_t
+    # This enhances the text representation with additional prompt influence
+    feature_PDVT = feature_text + alpha_t * pdv
+
+    # Combine the PDV-enhanced features with weighting factor beta
+    # Higher beta values emphasize text features; lower values emphasize image features
+    feature_PDVF = (1.0 - beta) * feature_PDVI + beta * feature_PDVT
+
+    return F.normalize(feature_PDVF, dim=-1)
+
+
 @torch.no_grad()
 def circo_generate_test_submission_file(dataset_path: str, clip_model_name: str, ref_names_list: List[str],
                                         pseudo_tokens: torch.Tensor, preprocess: callable,
@@ -244,7 +286,9 @@ def circo_generate_test_submission_file(dataset_path: str, clip_model_name: str,
                                         lambda1: Optional[float] = None,
                                         lambda2: Optional[float] = None,
                                         composed_captions: Optional[Dict[str, str]] = None,
-                                        lambda3: Optional[float] = None) -> None:
+                                        lambda3: Optional[float] = None,
+                                        use_pdv: bool = False, 
+                                        alpha_i: float = 1.0, alpha_t: float = 1.0, beta: float = 1.0) -> None:
     """
     Generate the test submission file for the CIRCO dataset given the pseudo tokens
     """
@@ -263,7 +307,8 @@ def circo_generate_test_submission_file(dataset_path: str, clip_model_name: str,
     # Get the predictions dict
     queryid_to_retrieved_images = circo_generate_test_dict(relative_test_dataset, clip_model, index_features,
                                                            index_names, ref_names_list, pseudo_tokens, lambda1, lambda2,
-                                                           composed_captions, lambda3)
+                                                           composed_captions, lambda3,
+                                                           use_pdv, alpha_i, alpha_t, beta)
 
     submissions_folder_path = PROJECT_ROOT / 'data' / "test_submissions" / 'circo'
     submissions_folder_path.mkdir(exist_ok=True, parents=True)
@@ -277,7 +322,9 @@ def circo_generate_test_predictions(clip_model: CLIP, relative_test_dataset: CIR
                                     lambda1: Optional[float] = None,
                                     lambda2: Optional[float] = None,
                                     composed_captions: Optional[Dict[str, str]] = None,
-                                    lambda3: Optional[float] = None) -> Tuple[torch.Tensor, List[str]]:
+                                    lambda3: Optional[float] = None,
+                                    use_pdv: bool = False, alpha_i: float = 1.0, alpha_t: float = 1.0,
+                                    beta: float = 1.0) -> Tuple[torch.Tensor, List[str]]:
     """
     Generate the test prediction features for the CIRCO dataset given the pseudo tokens
     """
@@ -332,6 +379,34 @@ def circo_generate_test_predictions(clip_model: CLIP, relative_test_dataset: CIR
             combined_features = combined_features + text_features_caption * lambda3
 
         predicted_features = F.normalize(combined_features, dim=-1)
+
+        if use_pdv:
+            # A. Tạo feature_text từ caption nền.
+            base_captions = ["a photo of $" for _ in query_ids]
+            base_caption_tokens = clip.tokenize(base_captions, context_length=77).to(device)
+
+            base_text_features = encode_with_pseudo_tokens(clip_model, base_caption_tokens, batch_tokens)
+
+            # base_text_features_gen = encode_with_pseudo_tokens(clip_model, base_caption_tokens, batch_tokens_gen)
+
+            # feature_text = (
+            #     F.normalize(base_text_features.float(), dim=-1) * lambda1 + 
+            #     F.normalize(base_text_features_gen.float(), dim=-1) * lambda2
+            # )
+            
+            feature_text = F.normalize(base_text_features, dim=-1)
+
+            # B. Tạo feature_image từ ảnh tham chiếu.
+            # Dataset trả về ảnh đã preprocess trong reference_image.
+            reference_images = batch['reference_image'].to(device)
+
+            feature_image = clip_model.encode_image(reference_images)
+            feature_image = F.normalize(feature_image, dim=-1)
+
+            # C. PDV
+            predicted_features = calculate_pdv_features(feature_text=feature_text, feature_text_composed=predicted_features,
+                                                        feature_image=feature_image, alpha_i=alpha_i, alpha_t=alpha_t, beta=beta)
+
         predicted_features_list.append(predicted_features)
         query_ids_list.extend(query_ids)
 
@@ -345,7 +420,8 @@ def circo_generate_test_predictions(clip_model: CLIP, relative_test_dataset: CIR
 def circo_generate_test_dict(relative_test_dataset: CIRCODataset, clip_model: CLIP, index_features: torch.Tensor,
                              index_names: List[str], ref_names_list: List[str], pseudo_tokens: torch.Tensor,
                              lambda1: Optional[float] = None, lambda2: Optional[float] = None,
-                             composed_captions: Optional[Dict[str, str]] = None, lambda3: Optional[float] = None,) \
+                             composed_captions: Optional[Dict[str, str]] = None, lambda3: Optional[float] = None,
+                             use_pdv: bool = False, alpha_i: float = 1.0, alpha_t: float = 1.0, beta: float = 1.0) \
         -> Dict[str, List[str]]:
     """
     Generate the test submission dicts for the CIRCO dataset given the pseudo tokens
@@ -355,7 +431,8 @@ def circo_generate_test_dict(relative_test_dataset: CIRCODataset, clip_model: CL
     predicted_features, query_ids = circo_generate_test_predictions(
                                     clip_model, relative_test_dataset,
                                     ref_names_list, pseudo_tokens, lambda1, lambda2,
-                                    composed_captions, lambda3)
+                                    composed_captions, lambda3,
+                                    use_pdv, alpha_i, alpha_t, beta)
 
     # Normalize the features
     index_features = F.normalize(index_features.float().to(device), dim=-1)
@@ -397,6 +474,10 @@ def main():
     parser.add_argument("--lambda3", type=float, help="Weight for the image composed caption text feature.")
     parser.add_argument("--composed-captioning", type=str, default=None,
                         help="Path to the JSON file containing precomputed composed captions.")
+    parser.add_argument("--use-pdv", action="store_true", help="Apply Prompt Directional Vectors (PDV) to CIRCO predictions.")
+    parser.add_argument("--alpha-i", type=float, default=1.0, help="PDV image-branch coefficient.")
+    parser.add_argument("--alpha-t", type=float, default=1.0, help="PDV text-branch coefficient.")
+    parser.add_argument("--beta", type=float, default=1.0, help="PDV interpolation coefficient between PDV-I and PDV-T.")
 
     args = parser.parse_args()
 
@@ -506,7 +587,8 @@ def main():
             args.dataset_path, clip_model_name, ref_names_list, pseudo_tokens,
             preprocess, args.submission_name, generated_image_dir=args.generated_image_dir, split=args.split,
             lambda1=args.lambda1, lambda2=args.lambda2,
-            composed_captions=composed_captions, lambda3=args.lambda3
+            composed_captions=composed_captions, lambda3=args.lambda3,
+            use_pdv=args.use_pdv, alpha_i=args.alpha_i, alpha_t=args.alpha_t, beta=args.beta
         )
 
     else:
