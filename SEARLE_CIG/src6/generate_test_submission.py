@@ -291,10 +291,10 @@ def circo_generate_test_predictions(clip_model: CLIP, relative_test_dataset: CIR
     relative_test_loader = DataLoader(dataset=relative_test_dataset, batch_size=32, num_workers=10,
                                       pin_memory=False, collate_fn=collate_fn, shuffle=False)
 
-    predicted_features_list = []
+    predicted_features_stage1_list = [] # stage 1 (Top 100)
+    predicted_features_stage2_list = [] # stage 2 (Re-rank Top 50)
     query_ids_list = []
 
-    # Compute the predictions
     for batch in tqdm(relative_test_loader):
         relative_captions = batch['relative_caption']
         query_ids = [str(query_id) for query_id in batch['query_id']]
@@ -310,36 +310,36 @@ def circo_generate_test_predictions(clip_model: CLIP, relative_test_dataset: CIR
         batch_tokens_gen = torch.vstack([pseudo_tokens[1][ref_names_list.index(query_id)].unsqueeze(0) for query_id in query_ids])
         text_features_gen = encode_with_pseudo_tokens(clip_model, tokenized_input_captions, batch_tokens_gen)
 
-        # Combine the original 2 branches.
-        combined_features = F.normalize(text_features, dim=-1) * lambda1 + F.normalize(text_features_gen, dim=-1) * lambda2
-
-        # Branch 3, if provided
+        # --- STAGE 1: Pseudo Token + Composed Caption ---
+        norm_text_feat = F.normalize(text_features, dim=-1)
+        
         if use_caption_branch and lambda3 != 0:
             missing_ids = [query_id for query_id in query_ids if query_id not in composed_captions]
             if missing_ids:
-                raise ValueError(
-                    "Missing composed captions for query IDs: "
-                    + ", ".join(missing_ids[:10])
-                    + (" ..." if len(missing_ids) > 10 else "")
-                )
-
+                raise ValueError("Missing composed captions for query IDs...")
             batch_composed_captions = [composed_captions[query_id] for query_id in query_ids]
             caption_tokens = clip.tokenize(batch_composed_captions, context_length=77).to(device)
+            text_features_caption = F.normalize(clip_model.encode_text(caption_tokens), dim=-1)
+            
+            feat_stage1 = norm_text_feat * lambda1 + text_features_caption * lambda3
+        else:
+            feat_stage1 = norm_text_feat * lambda1 # Fallback if not using caption branch
 
-            text_features_caption = clip_model.encode_text(caption_tokens)
-            text_features_caption = F.normalize(text_features_caption, dim=-1)
+        # --- STAGE 2: Pseudo Token + Generated-image ---
+        norm_text_feat_gen = F.normalize(text_features_gen, dim=-1)
+        feat_stage2 = norm_text_feat * lambda1 + norm_text_feat_gen * lambda2
 
-            combined_features = combined_features + text_features_caption * lambda3
-
-        predicted_features = F.normalize(combined_features, dim=-1)
-        predicted_features_list.append(predicted_features)
+        predicted_features_stage1_list.append(F.normalize(feat_stage1, dim=-1))
+        predicted_features_stage2_list.append(F.normalize(feat_stage2, dim=-1))
         query_ids_list.extend(query_ids)
 
-    if not predicted_features_list:
+    if not predicted_features_stage1_list:
         raise ValueError("The CIRCO query dataset is empty.")
 
-    predicted_features = torch.vstack(predicted_features_list)
-    return predicted_features, query_ids_list
+    pred_feat_stage1 = torch.vstack(predicted_features_stage1_list)
+    pred_feat_stage2 = torch.vstack(predicted_features_stage2_list)
+    
+    return pred_feat_stage1, pred_feat_stage2, query_ids_list
 
 
 def circo_generate_test_dict(relative_test_dataset: CIRCODataset, clip_model: CLIP, index_features: torch.Tensor,
@@ -351,23 +351,40 @@ def circo_generate_test_dict(relative_test_dataset: CIRCODataset, clip_model: CL
     Generate the test submission dicts for the CIRCO dataset given the pseudo tokens
     """
 
-    # Get the predicted features
-    predicted_features, query_ids = circo_generate_test_predictions(
-                                    clip_model, relative_test_dataset,
-                                    ref_names_list, pseudo_tokens, lambda1, lambda2,
-                                    composed_captions, lambda3)
+    # 1. Generate two sets of predicted features (Stage 1 and Stage 2)
+    pred_feat_stage1, pred_feat_stage2, query_ids = circo_generate_test_predictions(
+        clip_model, relative_test_dataset, ref_names_list, pseudo_tokens, lambda1, lambda2, composed_captions, lambda3
+    )
 
-    # Normalize the features
     index_features = F.normalize(index_features.float().to(device), dim=-1)
+    pred_feat_stage1 = pred_feat_stage1.to(device)
+    pred_feat_stage2 = pred_feat_stage2.to(device)
 
-    # Compute the similarity
-    similarity = predicted_features @ index_features.T
-    sorted_indices = torch.topk(similarity, dim=-1, k=50).indices.cpu()
-    sorted_index_names = np.array(index_names)[sorted_indices]
+    # STAGE 1: Use Stage 1 features to search the entire database and retrieve the Top 100 image
+    similarity_stage1 = pred_feat_stage1 @ index_features.T  # [N_queries, N_database]
+    top100_indices = torch.topk(similarity_stage1, dim=-1, k=100).indices.cpu()  # [N_queries, 100]
 
-    # Generate prediction dicts
-    queryid_to_retrieved_images = {query_id: query_sorted_names[:50].tolist() for
-                                   (query_id, query_sorted_names) in zip(query_ids, sorted_index_names)}
+    # STAGE 2: Retrieve the features of the 100 candidate images and score them using Stage 2 features
+    index_features_cpu = index_features.cpu()
+    candidate_features = index_features_cpu[top100_indices]  # [N_queries, 100, embed_dim]
+
+    # Compute similarity scores among the 100 candidate images
+    similarity_stage2 = torch.sum(pred_feat_stage2.cpu().unsqueeze(1) * candidate_features, dim=-1)  # [N_queries, 100]
+
+    # Select the Top 50 images from the 100 candidates
+    top50_local_indices = torch.topk(similarity_stage2, dim=-1, k=50).indices  # [N_queries, 50]
+
+    # Mapping back to the original index across the database
+    final_indices = torch.gather(top100_indices, dim=1, index=top50_local_indices).numpy()
+
+    # Convert image index into image filename
+    sorted_index_names = np.array(index_names)[final_indices]
+
+    # Create the submission dictionary
+    queryid_to_retrieved_images = {
+        query_id: query_sorted_names[:50].tolist()
+        for (query_id, query_sorted_names) in zip(query_ids, sorted_index_names)
+    }
 
     return queryid_to_retrieved_images
 
