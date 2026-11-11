@@ -83,7 +83,18 @@ def load_clip_model(clip_model_name: str, device: torch.device = device, downloa
         resolved_name, torch_dtype=torch.float16, cache_dir=download_root
     ).to(device).eval()
 
-    raw_processor = CLIPImageProcessor.from_pretrained(resolved_name, cache_dir=download_root)
+    raw_processor = CLIPImageProcessor(
+        crop_size={"height": 224, "width": 224},
+        do_center_crop=True,
+        do_convert_rgb=True,
+        do_normalize=True,
+        do_rescale=True,
+        do_resize=True,
+        image_mean=[0.48145466, 0.4578275, 0.40821073],
+        image_std=[0.26862954, 0.26130258, 0.27577711],
+        resample=3,  # BICUBIC
+        size={"shortest_edge": 224},
+    )
 
     def hf_preprocess(img):
         return raw_processor(images=img, return_tensors="pt")["pixel_values"].squeeze(0)
