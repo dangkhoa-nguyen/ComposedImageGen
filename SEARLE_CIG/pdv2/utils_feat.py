@@ -1,11 +1,16 @@
+import os
+from types import SimpleNamespace
 from typing import Optional, Tuple, List
 
+import clip
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from clip.model import CLIP
 from torch.utils.data import DataLoader
 from torch.utils.data import Dataset
 from tqdm import tqdm
+from transformers import CLIPImageProcessor, CLIPTextModelWithProjection, CLIPVisionModelWithProjection
 
 from data_utils import collate_fn
 from phi import Phi
@@ -17,6 +22,74 @@ else:
     device = torch.device("cpu")
     dtype = torch.float32
 
+
+class HFCLIPWrapper(nn.Module):
+    """
+    Wrapper giúp đồng nhất giao diện của Hugging Face CLIP (LinCIR) với OpenAI CLIP (CIG).
+    """
+    def __init__(self, image_encoder: CLIPVisionModelWithProjection, text_encoder: CLIPTextModelWithProjection):
+        super().__init__()
+        self.image_encoder = image_encoder
+        self.text_encoder = text_encoder
+        self.is_hf = True
+
+        # Giả lập các thuộc tính của OpenAI CLIP để giữ nguyên code CIG
+        self.visual = SimpleNamespace(
+            input_resolution=image_encoder.config.image_size,
+            output_dim=text_encoder.config.projection_dim
+        )
+        self.token_embedding = SimpleNamespace(
+            embedding_dim=text_encoder.config.hidden_size
+        )
+
+    @property
+    def dtype(self):
+        return self.text_encoder.dtype
+
+    def encode_image(self, images: torch.Tensor) -> torch.Tensor:
+        images = images.to(dtype=self.image_encoder.dtype)
+        return self.image_encoder(images).image_embeds
+
+    def encode_text(self, text: torch.Tensor) -> torch.Tensor:
+        return self.text_encoder(text).text_embeds
+
+
+def load_clip_model(clip_model_name: str, device: torch.device = device, download_root: str = "./"):
+    """
+    Tự động nhận diện và load OpenAI CLIP hoặc Hugging Face CLIP.
+    """
+    # Map các tên viết tắt của LinCIR (nếu có) sang repo Hugging Face chuẩn
+    hf_model_map = {
+        "large": "openai/clip-vit-large-patch14",
+        "huge": "laion/CLIP-ViT-H-14-laion2B-s32B-b79K",
+        "giga": "Geonmo/CLIP-Giga-config-fixed",
+    }
+    resolved_name = hf_model_map.get(clip_model_name, clip_model_name)
+
+    # Nhánh 1: Nếu là model của OpenAI CLIP (ViT-B/32, ViT-L/14, ...)
+    if resolved_name in clip.available_models() or os.path.isfile(resolved_name):
+        print(f"Loading OpenAI CLIP model: {resolved_name}")
+        clip_model, preprocess = clip.load(resolved_name, device=device, jit=False, download_root=download_root)
+        clip_model.is_hf = False
+        return clip_model, preprocess
+
+    # Nhánh 2: Nếu là model trên Hugging Face (Geonmo/CLIP-Giga-config-fixed, ...)
+    print(f"Loading HuggingFace CLIP model: {resolved_name}")
+    image_encoder = CLIPVisionModelWithProjection.from_pretrained(
+        resolved_name, torch_dtype=torch.float16, cache_dir=download_root
+    ).to(device).eval()
+
+    text_encoder = CLIPTextModelWithProjection.from_pretrained(
+        resolved_name, torch_dtype=torch.float16, cache_dir=download_root
+    ).to(device).eval()
+
+    raw_processor = CLIPImageProcessor.from_pretrained(resolved_name, cache_dir=download_root)
+
+    def hf_preprocess(img):
+        return raw_processor(images=img, return_tensors="pt")["pixel_values"].squeeze(0)
+
+    clip_model = HFCLIPWrapper(image_encoder, text_encoder).to(device).eval()
+    return clip_model, hf_preprocess
 
 @torch.no_grad()
 def extract_image_features(dataset: Dataset, clip_model: CLIP, batch_size: Optional[int] = 32,
@@ -98,7 +171,7 @@ def slerp_batch(v0, v1, t):
     interpolated = weight0 * v0 + weight1 * v1
     return interpolated
 @torch.no_grad()
-def extract_pseudo_tokens_with_phi(clip_model: CLIP, phi: Phi, dataset: Dataset,dataset_name="") -> Tuple[torch.Tensor, List[str]]:
+def extract_pseudo_tokens_with_phi(clip_model: CLIP, phi: Phi, dataset: Dataset, dataset_name="", l2_normalize: bool = False) -> Tuple[torch.Tensor, List[str]]:
     """
     Extracts pseudo tokens from a dataset using a CLIP model and a phi model
     """
@@ -107,10 +180,8 @@ def extract_pseudo_tokens_with_phi(clip_model: CLIP, phi: Phi, dataset: Dataset,
 
     predicted_tokens = []
     predicted_tokens_gen = []
-    predicted_tokens_gen1 = []
-    predicted_tokens_gen2 = []
     names_list = []
-    print(f"Extracting tokens using phi model")
+    print(f"Extracting tokens using phi model (l2_normalize={l2_normalize})")
     for batch in tqdm(data_loader):
         images = batch.get('image')
         names = batch.get('image_name')
@@ -123,14 +194,15 @@ def extract_pseudo_tokens_with_phi(clip_model: CLIP, phi: Phi, dataset: Dataset,
             names = batch.get('reference_name')
             names_t = batch.get('target_name')
 
-
         images_ref = images_ref.to(device)
         images_gen = images_gen.to(device)
 
-        image_features_ref = clip_model.encode_image(images_ref)
-        image_features_gen = clip_model.encode_image(images_gen)
+        image_features_ref = clip_model.encode_image(images_ref).float()
+        image_features_gen = clip_model.encode_image(images_gen).float()
 
-        image_features_ref = image_features_ref
+        if l2_normalize:
+            image_features_ref = F.normalize(image_features_ref, dim=-1)
+            image_features_gen = F.normalize(image_features_gen, dim=-1)
 
         batch_predicted_tokens_ref = phi(image_features_ref)
         batch_predicted_tokens_gen = phi(image_features_gen)
@@ -144,7 +216,7 @@ def extract_pseudo_tokens_with_phi(clip_model: CLIP, phi: Phi, dataset: Dataset,
             names_list.extend(id)
     predicted_tokens = torch.vstack(predicted_tokens)
     predicted_tokens_gen = torch.vstack(predicted_tokens_gen)
-    predicted_tokens = [predicted_tokens,predicted_tokens_gen]
+    predicted_tokens = [predicted_tokens, predicted_tokens_gen]
     return predicted_tokens, names_list
 
 
