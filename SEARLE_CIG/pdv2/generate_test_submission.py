@@ -16,7 +16,7 @@ from data_utils import PROJECT_ROOT, targetpad_transform
 from datasets import CIRRDataset, CIRCODataset
 from encode_with_pseudo_tokens import encode_with_pseudo_tokens
 from phi import Phi
-from utils_feat import extract_image_features, device, collate_fn, extract_pseudo_tokens_with_phi
+from utils_feat import extract_image_features, device, collate_fn, extract_pseudo_tokens_with_phi, load_clip_model
 
 import time
 
@@ -294,8 +294,10 @@ def circo_generate_test_submission_file(dataset_path: str, clip_model_name: str,
     """
 
     # Load the CLIP model
-    clip_model, _ = clip.load(clip_model_name, device=device, jit=False,download_root="./")
-    clip_model = clip_model.float().eval().requires_grad_(False)
+    clip_model, _ = load_clip_model(clip_model_name, device=device, download_root="./")
+    if not getattr(clip_model, 'is_hf', False):
+        clip_model = clip_model.float()
+    clip_model = clip_model.eval().requires_grad_(False)
 
     # Compute the index features
     classic_test_dataset = CIRCODataset(dataset_path, split, 'classic', preprocess)
@@ -351,11 +353,11 @@ def circo_generate_test_predictions(clip_model: CLIP, relative_test_dataset: CIR
         # Branch 1
         batch_tokens = torch.vstack([pseudo_tokens[0][ref_names_list.index(query_id)].unsqueeze(0) for query_id in query_ids])
         tokenized_input_captions = clip.tokenize(input_captions, context_length=77).to(device)
-        text_features = encode_with_pseudo_tokens(clip_model, tokenized_input_captions, batch_tokens)
+        text_features = encode_with_pseudo_tokens(clip_model, tokenized_input_captions, batch_tokens).float()
 
         # Branch 2
         batch_tokens_gen = torch.vstack([pseudo_tokens[1][ref_names_list.index(query_id)].unsqueeze(0) for query_id in query_ids])
-        text_features_gen = encode_with_pseudo_tokens(clip_model, tokenized_input_captions, batch_tokens_gen)
+        text_features_gen = encode_with_pseudo_tokens(clip_model, tokenized_input_captions, batch_tokens_gen).float()
 
         # Combine the original 2 branches.
         combined_features = F.normalize(text_features, dim=-1) * lambda1 + F.normalize(text_features_gen, dim=-1) * lambda2
@@ -373,7 +375,7 @@ def circo_generate_test_predictions(clip_model: CLIP, relative_test_dataset: CIR
             batch_composed_captions = [composed_captions[query_id] for query_id in query_ids]
             caption_tokens = clip.tokenize(batch_composed_captions, context_length=77).to(device)
 
-            text_features_caption = clip_model.encode_text(caption_tokens)
+            text_features_caption = clip_model.encode_text(caption_tokens).float()
             text_features_caption = F.normalize(text_features_caption, dim=-1)
 
             combined_features = combined_features + text_features_caption * lambda3
@@ -386,7 +388,7 @@ def circo_generate_test_predictions(clip_model: CLIP, relative_test_dataset: CIR
             base_captions = ["a photo of $" for _ in query_ids]
             base_caption_tokens = clip.tokenize(base_captions, context_length=77).to(device)
 
-            base_text_features = encode_with_pseudo_tokens(clip_model, base_caption_tokens, batch_tokens)
+            base_text_features = encode_with_pseudo_tokens(clip_model, base_caption_tokens, batch_tokens).float()
 
             # base_text_features_gen = encode_with_pseudo_tokens(clip_model, base_caption_tokens, batch_tokens_gen)
 
@@ -401,13 +403,13 @@ def circo_generate_test_predictions(clip_model: CLIP, relative_test_dataset: CIR
             # Dataset trả về ảnh đã preprocess trong reference_image.
             reference_images = batch['reference_image'].to(device)
 
-            feature_image = clip_model.encode_image(reference_images)
+            feature_image = clip_model.encode_image(reference_images).float()
             feature_image = F.normalize(feature_image, dim=-1)
 
             # C. PDV
             predicted_features = calculate_pdv_features(feature_text=feature_text, feature_text_composed=predicted_features,
                                                         feature_image=feature_image, alpha_i=alpha_i, alpha_t=alpha_t, beta=beta)
-            predicted_features = predicted_features + F.normalize(combined_features, dim=-1)
+            predicted_features = F.normalize(predicted_features + F.normalize(combined_features, dim=-1), dim=-1)
 
         predicted_features_list.append(predicted_features)
         query_ids_list.extend(query_ids)
@@ -514,6 +516,7 @@ def main():
 
 
     elif args.eval_type in ['phi', 'searle', 'searle-xl']:
+        l2_normalize = False
         if args.eval_type == 'phi':
             phi_path = PROJECT_ROOT / 'data' / "phi_models" / args.exp_name
             if not phi_path.exists():
@@ -521,15 +524,17 @@ def main():
 
             hyperparameters = json.load(open(phi_path / "hyperparameters.json"))
             clip_model_name = hyperparameters['clip_model_name']
-            clip_model, clip_preprocess = clip.load(clip_model_name, device=device, jit=False,download_root="./")
+            l2_normalize = hyperparameters.get('l2_normalize', False)
 
-            phi = Phi(input_dim=clip_model.visual.output_dim, hidden_dim=clip_model.visual.output_dim * 4,
-                      output_dim=clip_model.token_embedding.embedding_dim, dropout=hyperparameters['phi_dropout']).to(
-                device)
+            clip_model, clip_preprocess = load_clip_model(clip_model_name, device=device, download_root="./")
 
-            phi.load_state_dict(
-                torch.load(phi_path / 'checkpoints' / args.phi_checkpoint_name, map_location=device)[
-                    phi.__class__.__name__])
+            phi = Phi(input_dim=clip_model.visual.output_dim,
+                    hidden_dim=clip_model.visual.output_dim * 4,
+                    output_dim=clip_model.token_embedding.embedding_dim,
+                    dropout=hyperparameters.get('phi_dropout', 0.5)).to(device)
+
+            ckpt = torch.load(phi_path / 'checkpoints' / args.phi_checkpoint_name, map_location=device)
+            phi.load_state_dict(ckpt[phi.__class__.__name__] if phi.__class__.__name__ in ckpt else ckpt)
             phi = phi.eval()
 
         else:  # searle or searle-xl
@@ -566,8 +571,11 @@ def main():
         else:
             raise ValueError("Dataset not supported")
 
-        clip_model = clip_model.float().to(device)
-        pseudo_tokens, ref_names_list = extract_pseudo_tokens_with_phi(clip_model, phi, relative_test_dataset)
+        # Nếu là OpenAI CLIP thì ép kiểu float(), còn HFCLIPWrapper giữ nguyên fp16 cho nhẹ VRAM
+        if not getattr(clip_model, 'is_hf', False):
+            clip_model = clip_model.float().to(device)
+        pseudo_tokens, ref_names_list = extract_pseudo_tokens_with_phi(clip_model, phi, relative_test_dataset, l2_normalize=l2_normalize)
+        ref_names_list = [str(name) for name in ref_names_list]
         # import pdb;pdb.set_trace()
         pseudo_tokens[0] = pseudo_tokens[0].to(device)
         pseudo_tokens[1] = pseudo_tokens[1].to(device)
