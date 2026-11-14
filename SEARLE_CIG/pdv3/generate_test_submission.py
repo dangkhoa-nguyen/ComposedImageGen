@@ -18,6 +18,9 @@ from encode_with_pseudo_tokens import encode_with_pseudo_tokens
 from phi import Phi
 from utils_feat import extract_image_features, device, collate_fn, extract_pseudo_tokens_with_phi, load_clip_model
 
+import PIL.Image
+from transformers import BlipProcessor, BlipForConditionalGeneration
+
 import time
 
 
@@ -306,14 +309,16 @@ def circo_generate_test_submission_file(dataset_path: str, clip_model_name: str,
     relative_test_dataset = CIRCODataset(dataset_path, split, 'relative', preprocess,
                                          generated_image_dir=generated_image_dir)
 
-    # Get the predictions dict
-    queryid_to_retrieved_images = circo_generate_test_dict(relative_test_dataset, clip_model, index_features,
-                                                           index_names, ref_names_list, pseudo_tokens, lambda1, lambda2,
-                                                           composed_captions, lambda3,
-                                                           use_pdv, alpha_i, alpha_t, beta)
-
     submissions_folder_path = PROJECT_ROOT / 'data' / "test_submissions" / 'circo'
     submissions_folder_path.mkdir(exist_ok=True, parents=True)
+
+    # Get the predictions dict
+    queryid_to_retrieved_images = circo_generate_test_dict(relative_test_dataset, classic_test_dataset, clip_model, index_features,
+                                                           index_names, ref_names_list, pseudo_tokens, lambda1, lambda2,
+                                                           composed_captions, lambda3,
+                                                           use_pdv, alpha_i, alpha_t, beta,
+                                                           clip_model_name, split, submissions_folder_path)
+
 
     with open(submissions_folder_path / f"{submission_name}.json", 'w+') as file:
         json.dump(queryid_to_retrieved_images, file, sort_keys=True)
@@ -341,6 +346,7 @@ def circo_generate_test_predictions(clip_model: CLIP, relative_test_dataset: CIR
                                       pin_memory=False, collate_fn=collate_fn, shuffle=False)
 
     predicted_features_list = []
+    caption_features_list = []
     query_ids_list = []
 
     # Compute the predictions
@@ -379,34 +385,23 @@ def circo_generate_test_predictions(clip_model: CLIP, relative_test_dataset: CIR
             text_features_caption = F.normalize(text_features_caption, dim=-1)
 
             combined_features = combined_features + text_features_caption * lambda3
+            caption_features_list.append(text_features_caption)
 
         predicted_features = F.normalize(combined_features, dim=-1)
 
         # PDV_F calculation
         if use_pdv:
-            # A. Tạo feature_text từ caption nền.
             base_captions = ["a photo of $" for _ in query_ids]
             base_caption_tokens = clip.tokenize(base_captions, context_length=77).to(device)
 
-            base_text_features = encode_with_pseudo_tokens(clip_model, base_caption_tokens, batch_tokens).float()
-
-            # base_text_features_gen = encode_with_pseudo_tokens(clip_model, base_caption_tokens, batch_tokens_gen)
-
-            # feature_text = (
-            #     F.normalize(base_text_features.float(), dim=-1) * lambda1 + 
-            #     F.normalize(base_text_features_gen.float(), dim=-1) * lambda2
-            # )
-            
+            base_text_features = encode_with_pseudo_tokens(clip_model, base_caption_tokens, batch_tokens).float()            
             feature_text = F.normalize(base_text_features, dim=-1)
 
-            # B. Tạo feature_image từ ảnh tham chiếu.
-            # Dataset trả về ảnh đã preprocess trong reference_image.
-            reference_images = batch['reference_image'].to(device)
 
+            reference_images = batch['reference_image'].to(device)
             feature_image = clip_model.encode_image(reference_images).float()
             feature_image = F.normalize(feature_image, dim=-1)
 
-            # C. PDV
             predicted_features = calculate_pdv_features(feature_text=feature_text, feature_text_composed=predicted_features,
                                                         feature_image=feature_image, alpha_i=alpha_i, alpha_t=alpha_t, beta=beta)
             predicted_features = F.normalize(predicted_features + F.normalize(combined_features, dim=-1), dim=-1)
@@ -418,21 +413,104 @@ def circo_generate_test_predictions(clip_model: CLIP, relative_test_dataset: CIR
         raise ValueError("The CIRCO query dataset is empty.")
 
     predicted_features = torch.vstack(predicted_features_list)
-    return predicted_features, query_ids_list
+    caption_features = torch.vstack(caption_features_list)
+    return predicted_features, caption_features, query_ids_list
 
 
-def circo_generate_test_dict(relative_test_dataset: CIRCODataset, clip_model: CLIP, index_features: torch.Tensor,
+@torch.no_grad()
+def get_or_generate_blip_captions(candidate_img_names: List[str],
+                                  classic_test_dataset: CIRCODataset,
+                                  cache_path,
+                                  clip_model_name: str,
+                                  split: str,
+                                  top_k: int,
+                                  lambda1: float,
+                                  lambda2: float,
+                                  lambda3: float,
+                                  use_pdv: bool,
+                                  batch_size: int = 64) -> Dict[str, str]:
+    """
+    Load cached BLIP captions from database_captions.json or generate missing ones.
+    """
+    blip_model_name = "Salesforce/blip-image-captioning-base"
+    cached_captions = {}
+
+    if cache_path.is_file():
+        try:
+            with open(cache_path, "r", encoding="utf-8") as f:
+                cache_data = json.load(f)
+            cached_captions = cache_data.get("captions", {})
+            print(f"Loaded {len(cached_captions)} cached captions from {cache_path}")
+        except json.JSONDecodeError:
+            print(f"Warning: {cache_path} is corrupted or empty. Starting fresh.")
+            cached_captions = {}
+
+    missing_img_names = [name for name in candidate_img_names if name not in cached_captions]
+
+    if missing_img_names:
+        print(f"Generating BLIP captions for {len(missing_img_names)} new candidate images...")
+        processor = BlipProcessor.from_pretrained(blip_model_name)
+        blip_model = BlipForConditionalGeneration.from_pretrained(
+            blip_model_name,
+            torch_dtype=torch.float16 if "cuda" in str(device) else torch.float32
+        ).to(device).eval()
+
+        for i in tqdm(range(0, len(missing_img_names), batch_size), desc="BLIP Captioning"):
+            batch_names = missing_img_names[i:i + batch_size]
+            batch_images = []
+            for name in batch_names:
+                img_idx = classic_test_dataset.img_ids_indexes_map[str(name)]
+                img_path = classic_test_dataset.img_paths[img_idx]
+                batch_images.append(PIL.Image.open(img_path).convert("RGB"))
+
+            inputs = processor(images=batch_images, return_tensors="pt").to(device)
+            if "cuda" in str(device):
+                inputs["pixel_values"] = inputs["pixel_values"].to(torch.float16)
+
+            out_ids = blip_model.generate(**inputs, max_new_tokens=40)
+            decoded_captions = processor.batch_decode(out_ids, skip_special_tokens=True)
+
+            for name, cap in zip(batch_names, decoded_captions):
+                cached_captions[str(name)] = cap.strip()
+
+        del blip_model
+        del processor
+        if "cuda" in str(device):
+            torch.cuda.empty_cache()
+
+    output_json = {
+        "model": blip_model_name,
+        "backbone": clip_model_name,
+        "split": split,
+        "top": top_k,
+        "lambda1": lambda1,
+        "lambda2": lambda2,
+        "lambda3": lambda3,
+        "use_pdv": use_pdv,
+        "total_captions": len(cached_captions),
+        "captions": cached_captions
+    }
+
+    with open(cache_path, "w+", encoding="utf-8") as f:
+        json.dump(output_json, f, indent=2)
+
+    return cached_captions
+
+
+def circo_generate_test_dict(relative_test_dataset: CIRCODataset, classic_test_dataset: CIRCODataset,
+                             clip_model: CLIP, index_features: torch.Tensor,
                              index_names: List[str], ref_names_list: List[str], pseudo_tokens: torch.Tensor,
                              lambda1: Optional[float] = None, lambda2: Optional[float] = None,
                              composed_captions: Optional[Dict[str, str]] = None, lambda3: Optional[float] = None,
-                             use_pdv: bool = False, alpha_i: float = 1.0, alpha_t: float = 1.0, beta: float = 1.0) \
+                             use_pdv: bool = False, alpha_i: float = 1.0, alpha_t: float = 1.0, beta: float = 1.0,
+                             clip_model_name: str = "", split: str = "test", submissions_folder_path=None) \
         -> Dict[str, List[str]]:
     """
     Generate the test submission dicts for the CIRCO dataset given the pseudo tokens
     """
 
     # Get the predicted features
-    predicted_features, query_ids = circo_generate_test_predictions(
+    predicted_features, caption_features, query_ids = circo_generate_test_predictions(
                                     clip_model, relative_test_dataset,
                                     ref_names_list, pseudo_tokens, lambda1, lambda2,
                                     composed_captions, lambda3,
@@ -441,14 +519,60 @@ def circo_generate_test_dict(relative_test_dataset: CIRCODataset, clip_model: CL
     # Normalize the features
     index_features = F.normalize(index_features.float().to(device), dim=-1)
 
-    # Compute the similarity
+    # Stage 1: Compute similarity and retrieve top-k candidates
     similarity = predicted_features @ index_features.T
-    sorted_indices = torch.topk(similarity, dim=-1, k=50).indices.cpu()
+    sorted_indices = torch.topk(similarity, dim=-1, k=100).indices.cpu()
+    top_k = int(sorted_indices.shape[1])
     sorted_index_names = np.array(index_names)[sorted_indices]
 
-    # Generate prediction dicts
-    queryid_to_retrieved_images = {query_id: query_sorted_names[:50].tolist() for
-                                   (query_id, query_sorted_names) in zip(query_ids, sorted_index_names)}
+    # Collect unique candidate image names across all queries
+    unique_candidate_names = np.unique(sorted_index_names).tolist()
+    unique_candidate_names = [str(name) for name in unique_candidate_names]
+
+    # Generate or load BLIP captions for unique candidates
+    cache_path = submissions_folder_path / "database_captions.json"
+    cached_captions = get_or_generate_blip_captions(
+        candidate_img_names=unique_candidate_names,
+        classic_test_dataset=classic_test_dataset,
+        cache_path=cache_path,
+        clip_model_name=clip_model_name,
+        split=split,
+        top_k=top_k,
+        lambda1=lambda1,
+        lambda2=lambda2,
+        lambda3=lambda3,
+        use_pdv=use_pdv
+    )
+
+    # Stage 2: Encode candidate captions with CLIP text encoder
+    print(f"Encoding {len(unique_candidate_names)} candidate captions with CLIP text encoder...")
+    name_to_idx = {name: idx for idx, name in enumerate(unique_candidate_names)}
+    candidate_texts = [cached_captions[name] for name in unique_candidate_names]
+
+    candidate_text_features_list = []
+    encode_batch_size = 256
+    for i in range(0, len(candidate_texts), encode_batch_size):
+        batch_texts = candidate_texts[i:i + encode_batch_size]
+        tokens = clip.tokenize(batch_texts, context_length=77).to(device)
+        feats = clip_model.encode_text(tokens).float()
+        feats = F.normalize(feats, dim=-1)
+        candidate_text_features_list.append(feats)
+
+    candidate_text_features = torch.vstack(candidate_text_features_list)
+
+    # Re-rank top-k candidates for each query using Branch 3 (caption_features)
+    queryid_to_retrieved_images = {}
+    for q_idx, (query_id, query_candidate_names) in enumerate(zip(query_ids, sorted_index_names)):
+        cand_indices = [name_to_idx[str(name)] for name in query_candidate_names]
+        cand_feats = candidate_text_features[cand_indices]  # Shape: [top_k, D]
+
+        query_cap_feat = caption_features[q_idx].unsqueeze(0)  # Shape: [1, D]
+        rerank_sim = (query_cap_feat @ cand_feats.T).squeeze(0)  # Shape: [top_k]
+
+        reranked_order = torch.argsort(rerank_sim, descending=True).cpu().numpy()
+        reranked_names = query_candidate_names[reranked_order]
+
+        queryid_to_retrieved_images[query_id] = reranked_names[:50].tolist()
 
     return queryid_to_retrieved_images
 
